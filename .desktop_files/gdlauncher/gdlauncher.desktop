@@ -1,11 +1,8 @@
 [Desktop Entry]
-Version=1.0
 Name=GDLauncher
 Comment=Open-source Minecraft launcher
-# Exec=/home/tychart/programs/appimages/gdlauncher/GDLauncher__2.0.24__linux__x64.AppImage
-Exec=/home/tychart/programs/appimages/gdlauncher/run-gdlauncher.sh
+Exec=/home/tychart/programs/appimages/run-latest-appimage.sh --dir /home/tychart/programs/appimages/gdlauncher --glob 'GDLauncher__*__linux__x64.AppImage'
 Icon=/home/tychart/programs/appimages/gdlauncher/icon.png
 Terminal=false
 Type=Application
 Categories=Game;Utility;
-StartupWMClass=GDLauncher

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Obsidian
+Comment=The free and flexible app for your private thoughts
+Exec=/home/tychart/programs/appimages/run-latest-appimage.sh --dir /home/tychart/programs/appimages/obsidian --glob 'Obsidian-*.AppImage'
+Icon=/home/tychart/programs/appimages/obsidian/icon.png
+Terminal=false
+Type=Application
+Categories=Utility;
