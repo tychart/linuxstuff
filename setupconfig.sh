@@ -1,30 +1,41 @@
 #!/bin/bash
 
 # What does this do?
-#    The main purpose of this script is to make the bash terminal and 
-#    vim look better and have custom common aliases
-#    This script will copy its contents into 4 files, .profile, .bashrc, .vimrc, and .inputrc
+#    The main purpose of this script is to make the bash terminal and
+#    vim look better and have custom common aliases.
+#    This script will copy its contents into 4 files: .profile, .bashrc, .vimrc, and .inputrc
 
 # How to use this script:
 #    Copy the contents into a new file -> vim setupconfig.sh
-#    Allow exicution -> chmod 744 setupconfig.sh
-#    Run Script -> ./setupconfig.sh
+#    Allow execution    -> chmod +x setupconfig.sh
+#    Run Script         -> ./setupconfig.sh
+
+# Detect distro for compatibility
+DISTRO_ID=""
+if [ -f /etc/os-release ]; then
+    DISTRO_ID=$(. /etc/os-release && echo "$ID")
+fi
+
+# Determine the correct alternatives command for this distro
+# Debian/Ubuntu: update-alternatives
+# RHEL/Fedora/CentOS: /usr/sbin/alternatives or alternatives
+ALTERNATIVES_CMD=""
+if command -v update-alternatives &>/dev/null; then
+    ALTERNATIVES_CMD="update-alternatives"
+elif [ -x /usr/sbin/alternatives ]; then
+    ALTERNATIVES_CMD="/usr/sbin/alternatives"
+elif command -v alternatives &>/dev/null; then
+    ALTERNATIVES_CMD="alternatives"
+fi
 
 # Define the contents of each file
 read -r -d '' PROFILE_CONTENT <<'EOF'
 # ~/.profile: executed by the command interpreter for login shells.
 # This file is not read by bash(1), if ~/.bash_profile or ~/.bash_login
 # exists.
-# see /usr/share/doc/bash/examples/startup-files for examples.
-# the files are located in the bash-doc package.
-
-# the default umask is set in /etc/profile; for setting the umask
-# for ssh logins, install and configure the libpam-umask package.
-#umask 022
 
 # if running bash
 if [ -n "$BASH_VERSION" ]; then
-    # include .bashrc if it exists
     if [ -f "$HOME/.bashrc" ]; then
         . "$HOME/.bashrc"
     fi
@@ -53,8 +64,6 @@ EOF
 
 read -r -d '' BASHRC_CONTENT <<'EOF'
 # ~/.bashrc: executed by bash(1) for non-login shells.
-# see /usr/share/doc/bash/examples/startup-files (in the package bash-doc)
-# for examples
 
 # If not running interactively, don't do anything
 case $- in
@@ -75,11 +84,7 @@ alias lwd='ls -ld1 --color=auto --group-directories-first "$PWD"/*'
 alias ver='cat /etc/*-release'
 alias whoson='last -w|tac'
 alias myip='hostname -i'
-alias masterlist='vim /byu/scripts/ansible/daily_Audit/masterlist.txt'
-alias profile='vim $HOME/.profile'
-alias home='cd $HOME'
 alias details=get_machine_info
-alias sssdcache='systemctl stop sssd && rm -rf /var/lib/sss/db/* && systemctl start sssd'
 alias c='clear'
 alias src='source $HOME/.profile'
 alias vim='vim -u $HOME/.vimrc'
@@ -94,9 +99,6 @@ export SYSTEMD_EDITOR=vim
 export INPUTRC="$HOME/.inputrc"
 
 # Make bash append every command immediately to the history file
-#  history -a: Append current session’s new commands to $HISTFILE
-#  history -n: Read new commands from $HISTFILE (useful if another session added something)
-#export PROMPT_COMMAND='history -a; history -n'
 PROMPT_COMMAND="history -a; history -n; $PROMPT_COMMAND"
 
 HISTTIMEFORMAT="%d/%m/%y %T "
@@ -112,8 +114,6 @@ fi
 # Load git completion
 if [ -f /usr/share/bash-completion/completions/git ]; then
   . /usr/share/bash-completion/completions/git
-elif [ -f /usr/share/git/completion/git-completion.bash ]; then
-  . /usr/share/git/completion/git-completion.bash
 elif [ -f /etc/bash_completion.d/git ]; then
   . /etc/bash_completion.d/git
 fi
@@ -123,19 +123,25 @@ function mmkdir() {
   command mkdir -p $1; cd $1
 }
 
-##### Function to get the info for the Ubuntu or Red Hat machine currently being used
+##### Function to get the info for the machine currently being used
 function get_machine_info() {
-  if [ `cat /etc/*-release | grep "ubuntu" | wc -w` == "0" ]; then
-    if [ `cat /etc/*-release | grep "6.10" | wc -w` -ne "0" ]; then
-      os="rh6.10"
-    else
-      os="rh"
-    fi
+  if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    distro="$ID"
+    version_id="$VERSION_ID"
   else
-    os="ubu"
+    distro="unknown"
+    version_id="unknown"
   fi
 
-  ver="$os`cat /etc/*-release | grep "VERSION_ID" | grep -o -P '(?<=\").*(?=\")'`"
+  # Build short OS identifier
+  if [[ "$distro" == "ubuntu" ]]; then
+    os="ubu"
+  else
+    os="${distro}"
+  fi
+
+  ver="$os${version_id}"
   name=`hostname`
   ip=`hostname -i`
 
@@ -146,12 +152,20 @@ function get_machine_info() {
   printf "******************************\n"
 }
 
+get_os_short() {
+  if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    printf "%s%s" "$ID" "$VERSION_ID"
+  else
+    printf "unknown"
+  fi
+}
+
 function ssu() {
-  # 1. Preserve your HOME in sudo,
-  # 2. Export HOME again so bash picks up YOUR rcfile,
-  # 3. Launch bash as an interactive shell reading only your ~/.bashrc
+  # Preserve HOME in sudo, export HOME so bash picks up YOUR rcfile,
+  # launch bash as an interactive shell reading only your ~/.bashrc
   sudo --preserve-env=HOME \
-       env HOME="$HOME"                              \
+       env HOME="$HOME" \
        bash --rcfile "$HOME/.bashrc" -i
 }
 
@@ -162,29 +176,22 @@ if [ "$TERM" == "xterm-color" ]; then
   export PS1="\u@\h \w $"
 else
   if (( $EUID != 0 )); then
-    export PS1="\[\e[1;32m\]\u\[\e[0m\]@\[\e[0;31m\]\h\[\e[1;36m\](`get_machine_info | grep "Operating system" | cut -d " " -f 3`) \[\e[1;34m\]\w \[\e[0m\]$ \[\e[0m\]"
+    export PS1="\[\e[1;32m\]\u\[\e[0m\]@\[\e[0;31m\]\h\[\e[1;36m\]($(get_os_short)) \[\e[1;34m\]\w \[\e[0m\]$ \[\e[0m\]"
   else
-    export PS1="\[\e[1;35m\]\u\[\e[0m\]@\[\e[0:31m\]\h\[\e[1;36m\](`get_machine_info | grep "Operating system" | cut -d " " -f 3`) \[\e[01;34m\]\w\[\e[0m\] # "
+    export PS1="\[\e[1;35m\]\u\[\e[0m\]@\[\e[0:31m\]\h\[\e[1;36m\]($(get_os_short)) \[\e[01;34m\]\w\[\e[0m\] # "
   fi
 fi
 
 ##### Custom ctrl+backspace kill word behavior
-# Define a custom widget that deletes text backward up to our chosen boundaries.
 my_custom_backwards_kill_word() {
     local line=$READLINE_LINE
     local pos=$READLINE_POINT
 
-    # Define the set of boundary characters:
-    # This regex matches any whitespace, slash, or period.
-    local boundary_chars="[^[:alnum:]]"               # This will break on every non alphanumeric char
-    #local boundary_chars="[[:space:]/\.]"            # This will break on space, forward-slash and period
+    local boundary_chars="[^[:alnum:]]"
 
-    if [[ $READLINE_POINT != 0 ]]; then               # Make sure that there is actually something to delete
-
-      # At least delete the first character behind the cursor, even if it is a boundry character
+    if [[ $READLINE_POINT != 0 ]]; then
       (( pos-- ))
 
-      # Loop backwards from the cursor until we hit a boundary character
       while (( pos > 0 )); do
           local char=${line:pos-1:1}
           if [[ $char =~ $boundary_chars ]]; then
@@ -193,14 +200,11 @@ my_custom_backwards_kill_word() {
           (( pos-- ))
       done
 
-      # Remove the text from the calculated position to the original cursor position.
       READLINE_LINE="${line:0:pos}${line:READLINE_POINT}"
       READLINE_POINT=$pos
     fi
 }
 
-# Bind the new widget to a key sequence (here Ctrl-H is used as an example).
-# (Make sure the key sequence you choose is actually sent uniquely by your terminal.)
 bind -x '"\C-h": my_custom_backwards_kill_word'
 EOF
 
@@ -234,15 +238,9 @@ map <F6> :call ToggleCurline()<CR>
 imap <F6> :call ToggleCurline()<CR>
 
 set mouse=a
-"map <ScrollWheelUp> <C-Y>
-"map <ScrollWheelDown> <C-E>
 
 map <ScrollWheelUp> <Up>
 map <ScrollWheelDown> <Down>
-
-"nnoremap <space> :nohlsearch<CR>
-"imap <A-left> <S-left>
-"imap <Esc><BS> <C-W>
 
 fu! ToggleCurline ()
   if &cursorline
@@ -258,7 +256,6 @@ augroup vimStartup
     \ if line("'\"") >= 1 && line("'\"") <= line("$") && &ft !~# 'commit'
     \ |   exe "normal! g`\""
     \ | endif
-
 augroup END
 EOF
 
@@ -266,27 +263,13 @@ EOF
 
 read -r -d '' INPUTRC_CONTENT <<'EOF'
 # /etc/inputrc - global inputrc for libreadline
-# See readline(3readline) and `info rluserman' for more information.
 
 # Be 8 bit clean.
 set input-meta on
 set output-meta on
 
-# To allow the use of 8bit-characters like the german umlauts, uncomment
-# the line below. However this makes the meta key not work as a meta key,
-# which is annoying to those which don't need to type in 8-bit characters.
-
-# set convert-meta off
-
-# try to enable the application keypad when it is called.  Some systems
-# need this to enable the arrow keys.
-# set enable-keypad on
-
-# see /usr/share/doc/bash/inputrc.arrows for other codes of arrow keys
-
 # do not bell on tab-completion
-# set bell-style none
-# set bell-style visible
+set bell-style none
 
 # some defaults / modifications for the emacs mode
 $if mode=emacs
@@ -298,15 +281,6 @@ $if mode=emacs
 # allow the use of the Delete/Insert keys
 "\e[3~": delete-char
 "\e[2~": quoted-insert
-
-# mappings for "page up" and "page down" to step to the beginning/end
-# of the history
-# "\e[5~": beginning-of-history
-# "\e[6~": end-of-history
-
-# alternate mappings for "page up" and "page down" to search the history
-# "\e[5~": history-search-backward
-# "\e[6~": history-search-forward
 
 # mappings for Ctrl-left-arrow and Ctrl-right-arrow for word moving
 "\e[1;5C": forward-word
@@ -321,23 +295,21 @@ $if term=rxvt
 "\e[8~": end-of-line
 "\eOc": forward-word
 "\eOd": backward-word
-
 $endif
-
-# for non RH/Debian xterm, can't hurt for RH/Debian xterm
-# "\eOH": beginning-of-line
-# "\eOF": end-of-line
-
-# for freebsd console
-# "\e[H": beginning-of-line
-# "\e[F": end-of-line
 
 $endif
 EOF
 
 
-# Update the alternatives to set vim as the default editor
-sudo update-alternatives --set editor /usr/bin/vim.basic
+# Update the alternatives to set vim as the default editor (distro-safe)
+if [[ -n "$ALTERNATIVES_CMD" ]]; then
+    echo "Setting vim as default editor via $ALTERNATIVES_CMD..."
+    $ALTERNATIVES_CMD --set editor /usr/bin/vim.basic 2>/dev/null || \
+    $ALTERNATIVES_CMD --set editor /usr/bin/vim 2>/dev/null || \
+    echo "Warning: Could not set default editor via alternatives (this is OK on some distros)"
+else
+    echo "Note: No alternatives command found; EDITOR/VISUAL set in bashrc only."
+fi
 
 
 
@@ -355,35 +327,24 @@ echo "$INPUTRC_CONTENT" > "$inputrc_file" 2> /tmp/inputrc_error
 
 # Check if any error file is not empty
 if [[ -s /tmp/profile_error || -s /tmp/bashrc_error || -s /tmp/vimrc_error || -s /tmp/inputrc_error ]]; then
-    # Output failure message
     echo "Error: Files not copied successfully!"
-    # Print error messages
-    echo "Profile error:"
-    cat /tmp/profile_error
-    echo "Bashrc error:"
-    cat /tmp/bashrc_error
-    echo "Vimrc error:"
-    cat /tmp/vimrc_error
-    echo "Inputrc error:"
-    cat /tmp/inputrc_error
-
-    # Clean up temporary error files
+    echo "Profile error:"; cat /tmp/profile_error
+    echo "Bashrc error:"; cat /tmp/bashrc_error
+    echo "Vimrc error:"; cat /tmp/vimrc_error
+    echo "Inputrc error:"; cat /tmp/inputrc_error
     rm -f /tmp/profile_error /tmp/bashrc_error /tmp/vimrc_error /tmp/inputrc_error
-
 else
-    # Output success message
     echo "Files copied successfully!"
 
     # Add custom git log alias
     git config --global alias.lg "log --graph --all --decorate --pretty=format:'%C(blue)%h%Creset%C(yellow)%d%Creset %s %C(blue)%an%Creset %C(green)(%ar)%Creset'"
 
-    # Set git defualt primary branch to be main instead of master
-    git config --global init.defaultBranch main  
+    # Set git default primary branch to main
+    git config --global init.defaultBranch main
 
     echo "Reloading .profile"
     source ~/.profile
-    
-    # Script executed successfully, remove the script file
+
     echo "Removing this setup script"
     rm "$0"
 fi
