@@ -6,9 +6,14 @@
 #    This script will copy its contents into 4 files: .profile, .bashrc, .vimrc, and .inputrc
 
 # How to use this script:
-#    Copy the contents into a new file -> vim setupconfig.sh
-#    Allow execution    -> chmod +x setupconfig.sh
-#    Run Script         -> ./setupconfig.sh
+#
+#    Manual:
+#        Copy the contents into a new file -> vim setupconfig.sh
+#        Allow execution                   -> chmod +x setupconfig.sh
+#        Run Script                        -> ./setupconfig.sh
+#
+#    Automatic:
+#        curl -sL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash
 
 # Detect distro for compatibility
 DISTRO_ID=""
