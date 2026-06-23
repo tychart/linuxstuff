@@ -9,7 +9,7 @@
 # Behavior:
 #   - Updates clearly marked managed blocks inside standard dotfiles
 #   - Preserves user content outside those managed blocks
-#   - Creates timestamped backups before changing files
+#   - Avoids backups when only script-owned managed content is being refreshed
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
 #
 # Usage:
@@ -26,6 +26,7 @@ set -euo pipefail
 SCRIPT_TAG="tychart-setup"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
+# Single source of truth for the preferred editor written into ~/.profile.
 DEFAULT_EDITOR="vim"
 
 PROFILE_FILE="$HOME/.profile"
@@ -57,6 +58,12 @@ cleanup_backups() {
   shopt -s nullglob
 
   for file in \
+    "$HOME"/setupconfig_backup_.profile.* \
+    "$HOME"/setupconfig_backup_.bash_profile.* \
+    "$HOME"/setupconfig_backup_.bashrc.* \
+    "$HOME"/setupconfig_backup_.vimrc.* \
+    "$HOME"/setupconfig_backup_.inputrc.* \
+    "$VIM_PLUGIN_DIR"/setupconfig_backup_oscyank.vim.* \
     "$HOME"/.profile.bak."$SCRIPT_TAG".* \
     "$HOME"/.bash_profile.bak."$SCRIPT_TAG".* \
     "$HOME"/.bashrc.bak."$SCRIPT_TAG".* \
@@ -72,7 +79,7 @@ cleanup_backups() {
   shopt -u nullglob
 
   if [ "$count" -eq 0 ]; then
-    log "No ${SCRIPT_TAG} backup files found."
+    log "No setupconfig backup files found."
   else
     log "Removed $count backup file(s)."
   fi
@@ -103,16 +110,21 @@ parse_args "$@"
 backup_file() {
   local file="$1"
   local backup
+  local dir
+  local base
 
   [ -e "$file" ] || return 0
 
-  backup="${file}.bak.${SCRIPT_TAG}.${TIMESTAMP}"
+  dir="$(dirname "$file")"
+  base="$(basename "$file")"
+  backup="${dir}/setupconfig_backup_${base}.${TIMESTAMP}"
   if [ ! -e "$backup" ]; then
     cp -a -- "$file" "$backup"
     log "Backed up $file -> $backup"
   fi
 }
 
+# Replace one managed block inside a file while leaving everything else alone.
 upsert_managed_block() {
   local file="$1"
   local name="$2"
@@ -120,14 +132,18 @@ upsert_managed_block() {
   local marker_prefix="${4:-#}"
   local start_marker="${marker_prefix} >>> ${SCRIPT_TAG}:${name} >>>"
   local end_marker="${marker_prefix} <<< ${SCRIPT_TAG}:${name} <<<"
+  # Also recognize older marker styles so reruns can cleanly replace them.
   local legacy_hash_start="# >>> ${SCRIPT_TAG}:${name} >>>"
   local legacy_hash_end="# <<< ${SCRIPT_TAG}:${name} <<<"
   local legacy_vim_start="\" >>> ${SCRIPT_TAG}:${name} >>>"
   local legacy_vim_end="\" <<< ${SCRIPT_TAG}:${name} <<<"
   local tmp
+  local preserved_tmp
+  local first_preserved_line=''
 
   mkdir -p "$(dirname "$file")"
   tmp="$(mktemp)"
+  preserved_tmp="$(mktemp)"
 
   if [ -f "$file" ]; then
     awk \
@@ -140,38 +156,31 @@ upsert_managed_block() {
         $0 == start || $0 == old_hash_start || $0 == old_vim_start { skip = 1; next }
         $0 == end   || $0 == old_hash_end   || $0 == old_vim_end   { skip = 0; next }
         !skip { print }
-      ' "$file" > "$tmp"
+      ' "$file" > "$preserved_tmp"
   else
-    : > "$tmp"
+    : > "$preserved_tmp"
   fi
 
-  if [ -s "$tmp" ]; then
-    awk '
-      { lines[NR] = $0 }
-      END {
-        last = NR
-        while (last > 0 && lines[last] == "") {
-          last--
-        }
-        for (i = 1; i <= last; i++) {
-          print lines[i]
-        }
-      }
-    ' "$tmp" > "${tmp}.trim"
-    mv "${tmp}.trim" "$tmp"
-    printf '\n' >> "$tmp"
-  fi
+  {
+    printf '%s\n%s\n%s\n' "$start_marker" "$content" "$end_marker"
 
-  printf '%s\n%s\n%s\n' "$start_marker" "$content" "$end_marker" >> "$tmp"
+    if [ -s "$preserved_tmp" ]; then
+      IFS= read -r first_preserved_line < "$preserved_tmp" || true
+      if [ -n "$first_preserved_line" ]; then
+        printf '\n'
+      fi
+      cat "$preserved_tmp"
+    fi
+  } > "$tmp"
 
   if [ -f "$file" ] && cmp -s "$file" "$tmp"; then
-    rm -f "$tmp"
+    rm -f "$tmp" "$preserved_tmp"
     log "Managed block '$name' unchanged in $file"
     return 0
   fi
 
-  backup_file "$file"
   mv "$tmp" "$file"
+  rm -f "$preserved_tmp"
   log "Updated managed block '$name' in $file"
 }
 
@@ -190,7 +199,6 @@ write_managed_file() {
     return 0
   fi
 
-  backup_file "$file"
   mv "$tmp" "$file"
   log "Wrote $file"
 }
@@ -304,7 +312,8 @@ ensure_dependencies() {
 ensure_dependencies
 
 PROFILE_CONTENT=$(cat <<'EOF'
-# Load interactive Bash settings for login shells.
+# Login shells read ~/.profile first, then pull in ~/.bashrc for interactive extras.
+# The guard avoids an infinite loop when ~/.bashrc later sources ~/.profile.
 if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ] && [ -z "${__TYCHART_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
   case $- in
     *i*) . "$HOME/.bashrc" ;;
@@ -322,7 +331,7 @@ for dir in "$HOME/.local/bin" "$HOME/bin"; do
 done
 export PATH
 
-# Editor defaults.
+# Editor defaults live here so other tools can simply inherit them.
 export EDITOR="__DEFAULT_EDITOR__"
 export VISUAL="__DEFAULT_EDITOR__"
 export SYSTEMD_EDITOR="__DEFAULT_EDITOR__"
@@ -346,7 +355,8 @@ case $- in
   *) return ;;
 esac
 
-# Inherit login-shell environment when a terminal starts a non-login shell.
+# Many terminals start Bash as a non-login shell, which skips ~/.profile.
+# If EDITOR is missing, source ~/.profile so this shell inherits the same defaults.
 if [ -z "${EDITOR:-}" ] && [ -r "$HOME/.profile" ]; then
   __TYCHART_SOURCING_PROFILE_FROM_BASHRC=1
   . "$HOME/.profile"
@@ -364,6 +374,7 @@ shopt -s histappend
 shopt -s checkwinsize
 
 __tychart_history_sync() {
+  # Append this shell's new history lines, then pull in lines from other shells.
   history -a
   history -n
 }
@@ -395,10 +406,7 @@ alias ....='cd ../../..'
 alias .....='cd ../../../..'
 alias c='clear'
 alias k='kubectl'
-alias la='LC_COLLATE=C ls -alF --group-directories-first'
 alias ll='ls -lah --color=auto --group-directories-first'
-alias lt='ls -ltr --color=auto --group-directories-first'
-alias lwd='ls -ld1 --color=auto --group-directories-first "$PWD"/*'
 alias myip='hostname -I 2>/dev/null | awk "{print \$1}"'
 alias src='source "$HOME/.profile"'
 alias venv='source .venv/bin/activate'
@@ -484,6 +492,7 @@ export PS1
 # Readline quality-of-life.
 bind 'set bell-style none'
 
+# Delete backward until punctuation/whitespace instead of treating punctuation as part of a word.
 my_custom_backwards_kill_word() {
   local line="$READLINE_LINE"
   local pos="$READLINE_POINT"
@@ -507,7 +516,11 @@ my_custom_backwards_kill_word() {
   READLINE_POINT=$pos
 }
 
+# Ctrl+Backspace often arrives as Ctrl+H in terminals.
 bind -x '"\C-h": my_custom_backwards_kill_word'
+
+# Ctrl+W is rebound to match the custom Ctrl+Backspace behavior above.
+bind -x '"\C-w": my_custom_backwards_kill_word'
 EOF
 )
 
@@ -519,13 +532,16 @@ if has('autocmd')
   filetype plugin indent on
 endif
 
+" Basic editing and search defaults.
 set number
 set showcmd
 set ruler
 set wildmenu
+
 if exists('&wildmode')
   set wildmode=longest:full,full
 endif
+
 set lazyredraw
 set showmatch
 set incsearch
@@ -537,9 +553,11 @@ set autoindent
 set expandtab
 set tabstop=2
 set shiftwidth=2
+
 if exists('&softtabstop')
   set softtabstop=2
 endif
+
 set mouse=a
 set hidden
 set splitbelow
@@ -551,6 +569,7 @@ set visualbell
 set laststatus=2
 set cursorline
 
+" Save undo history on disk so undo still works after reopening a file.
 if has('persistent_undo')
   set undodir=~/.vim/undodir
   set undofile
@@ -558,19 +577,23 @@ if has('persistent_undo')
   set undoreload=10000
 endif
 
+" F6 toggles the highlighted current line. Double-Esc clears search highlighting.
 nnoremap <silent> <F6> :set cursorline!<CR>
 inoremap <silent> <F6> <C-o>:set cursorline!<CR>
 nnoremap <silent> <Esc><Esc> :nohlsearch<CR>
 
+" Use space as the leader key for custom shortcuts.
 if !exists('mapleader')
   let mapleader = ' '
 endif
 
-" Explicit OSC 52 copy to system clipboard.
+" OSC 52 lets Vim copy over SSH/remote terminals without needing a local clipboard provider.
+" <leader>c copies the current motion or visual selection.
 nmap <leader>c <Plug>OSCYankOperator
 nmap <leader>cc <leader>c_
 vmap <leader>c <Plug>OSCYankVisual
 
+" Reopen files at the last cursor position from the previous edit session.
 augroup tychart_vim_startup
   autocmd!
   autocmd BufReadPost *
@@ -585,6 +608,10 @@ INPUTRC_CONTENT=$(cat <<'EOF'
 set input-meta on
 set output-meta on
 set bell-style none
+
+# Let custom Readline bindings win instead of auto-reserving tty keys like Ctrl+W.
+set bind-tty-special-chars off
+
 set completion-ignore-case on
 set show-all-if-ambiguous on
 set mark-symlinked-directories on
@@ -612,6 +639,8 @@ $endif
 EOF
 )
 
+# Install a small custom Vim plugin so copy works reliably in SSH, tmux, and other remote terminals.
+# It uses OSC 52 escape sequences instead of depending on xclip/pbcopy or a local GUI clipboard.
 OSCYANK_PLUGIN_CONTENT=$(cat <<'EOF'
 " -------------------- INIT --------------------------------
 if exists('g:loaded_oscyank')
@@ -775,34 +804,4 @@ endfunction
 function! OSCYankRegister(register) abort
   let l:text = getreg(a:register)
   return OSCYank(l:text)
-endfunction
-
-" -------------------- COMMANDS ----------------------------
-command! -nargs=1 OSCYank call OSCYank('<args>')
-command! -range OSCYankVisual call OSCYankVisual()
-command! -register OSCYankRegister call OSCYankRegister('<reg>')
-
-nnoremap <expr> <Plug>OSCYankOperator OSCYankOperator()
-vnoremap <Plug>OSCYankVisual :OSCYankVisual<CR>
-EOF
-)
-
-log "Applying managed configuration blocks"
-mkdir -p "$VIM_PLUGIN_DIR" "$VIM_UNDO_DIR"
-
-upsert_managed_block "$PROFILE_FILE" "profile" "$PROFILE_CONTENT"
-upsert_managed_block "$BASH_PROFILE_FILE" "bash_profile" "$BASH_PROFILE_CONTENT"
-upsert_managed_block "$BASHRC_FILE" "bashrc" "$BASHRC_CONTENT"
-upsert_managed_block "$VIMRC_FILE" "vimrc" "$VIMRC_CONTENT" '"'
-upsert_managed_block "$INPUTRC_FILE" "inputrc" "$INPUTRC_CONTENT"
-write_managed_file "$OSCYANK_FILE" "$OSCYANK_PLUGIN_CONTENT"
-
-if command -v git >/dev/null 2>&1; then
-  log "Updating Git defaults"
-  git config --global --unset-all core.editor >/dev/null 2>&1 || true
-  git config --global init.defaultBranch main
-  git config --global alias.lg "log --graph --all --decorate --pretty=format:'%C(blue)%h%Creset%C(yellow)%d%Creset %s %C(blue)%an%Creset %C(green)(%ar)%Creset'"
-fi
-
-log "Done. Open a new shell or run: source ~/.profile"
-log "If Vim is already open, restart it to load updated config/plugin."
+en
