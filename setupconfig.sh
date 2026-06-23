@@ -25,6 +25,8 @@ set -euo pipefail
 SCRIPT_TAG="tychart-setup"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
+DEFAULT_EDITOR="vim"
+
 PROFILE_FILE="$HOME/.profile"
 BASH_PROFILE_FILE="$HOME/.bash_profile"
 BASHRC_FILE="$HOME/.bashrc"
@@ -302,7 +304,7 @@ ensure_dependencies
 
 PROFILE_CONTENT=$(cat <<'EOF'
 # Load interactive Bash settings for login shells.
-if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ]; then
+if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ] && [ -z "${__TYCHART_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
   case $- in
     *i*) . "$HOME/.bashrc" ;;
   esac
@@ -320,12 +322,13 @@ done
 export PATH
 
 # Editor defaults.
-export EDITOR="${EDITOR:-vim}"
-export VISUAL="${VISUAL:-vim}"
-export SYSTEMD_EDITOR="${SYSTEMD_EDITOR:-vim}"
+export EDITOR="__DEFAULT_EDITOR__"
+export VISUAL="__DEFAULT_EDITOR__"
+export SYSTEMD_EDITOR="__DEFAULT_EDITOR__"
 export INPUTRC="${INPUTRC:-$HOME/.inputrc}"
 EOF
 )
+PROFILE_CONTENT="${PROFILE_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 
 BASH_PROFILE_CONTENT=$(cat <<'EOF'
 # Ensure Bash login shells also load ~/.profile.
@@ -342,10 +345,13 @@ case $- in
   *) return ;;
 esac
 
-# Editor defaults for interactive shells as well.
-export EDITOR="${EDITOR:-vim}"
-export VISUAL="${VISUAL:-vim}"
-export SYSTEMD_EDITOR="${SYSTEMD_EDITOR:-vim}"
+# Inherit login-shell environment when a terminal starts a non-login shell.
+if [ -z "${EDITOR:-}" ] && [ -r "$HOME/.profile" ]; then
+  __TYCHART_SOURCING_PROFILE_FROM_BASHRC=1
+  . "$HOME/.profile"
+  unset __TYCHART_SOURCING_PROFILE_FROM_BASHRC
+fi
+
 export INPUTRC="${INPUTRC:-$HOME/.inputrc}"
 
 # History behavior.
@@ -792,7 +798,7 @@ write_managed_file "$OSCYANK_FILE" "$OSCYANK_PLUGIN_CONTENT"
 
 if command -v git >/dev/null 2>&1; then
   log "Updating Git defaults"
-  git config --global core.editor vim
+  git config --global --unset-all core.editor >/dev/null 2>&1 || true
   git config --global init.defaultBranch main
   git config --global alias.lg "log --graph --all --decorate --pretty=format:'%C(blue)%h%Creset%C(yellow)%d%Creset %s %C(blue)%an%Creset %C(green)(%ar)%Creset'"
 fi
