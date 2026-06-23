@@ -804,4 +804,35 @@ endfunction
 function! OSCYankRegister(register) abort
   let l:text = getreg(a:register)
   return OSCYank(l:text)
-en
+endfunction
+
+" -------------------- COMMANDS ----------------------------
+command! -nargs=1 OSCYank call OSCYank('<args>')
+command! -range OSCYankVisual call OSCYankVisual()
+command! -register OSCYankRegister call OSCYankRegister('<reg>')
+
+nnoremap <expr> <Plug>OSCYankOperator OSCYankOperator()
+vnoremap <Plug>OSCYankVisual :OSCYankVisual<CR>
+EOF
+)
+
+log "Applying managed configuration blocks"
+mkdir -p "$VIM_PLUGIN_DIR" "$VIM_UNDO_DIR"
+
+upsert_managed_block "$PROFILE_FILE" "profile" "$PROFILE_CONTENT"
+upsert_managed_block "$BASH_PROFILE_FILE" "bash_profile" "$BASH_PROFILE_CONTENT"
+upsert_managed_block "$BASHRC_FILE" "bashrc" "$BASHRC_CONTENT"
+upsert_managed_block "$VIMRC_FILE" "vimrc" "$VIMRC_CONTENT" '"'
+upsert_managed_block "$INPUTRC_FILE" "inputrc" "$INPUTRC_CONTENT"
+write_managed_file "$OSCYANK_FILE" "$OSCYANK_PLUGIN_CONTENT"
+
+if command -v git >/dev/null 2>&1; then
+  log "Updating Git defaults"
+  # Remove a hardcoded Git editor so Git inherits $EDITOR from ~/.profile.
+  git config --global --unset-all core.editor >/dev/null 2>&1 || true
+  git config --global init.defaultBranch main
+  git config --global alias.lg "log --graph --all --decorate --pretty=format:'%C(blue)%h%Creset%C(yellow)%d%Creset %s %C(blue)%an%Creset %C(green)(%ar)%Creset'"
+fi
+
+log "Done. Open a new shell or run: source ~/.profile"
+log "If Vim is already open, restart it to load updated config/plugin."
