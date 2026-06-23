@@ -19,6 +19,7 @@
 #
 #   or
 #   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --cleanup-backups
 
 set -euo pipefail
 
