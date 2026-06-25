@@ -17,3 +17,7 @@ keybinds {
 
 copy_on_select false
 ```
+
+
+Link to patched zellij binary:
+https://drive.google.com/file/d/1zDVZ42TuboRkjGTFV2ytEh8ljOl8C5RV/view?usp=drive_link
