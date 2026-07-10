@@ -2,9 +2,9 @@
 
 
 
-Example config with custom `SmartCopy` patch. Just replace the whole default config with this
+Example config with custom `SmartCopy` patch. Just replace the whole default config with the following at location `~/.config/zellij/config.kdl`
+
 ```
-tychart@SOPCS-G0X7RT3(fedora44) ~ $ cat .config/zellij/config.kdl
 keybinds {
     normal {
         bind "Ctrl c" { SmartCopy; }
@@ -12,6 +12,15 @@ keybinds {
 
     scroll {
         bind "Ctrl c" { SmartCopy; }
+    }
+
+    shared_except "locked" {
+        bind "Alt y" {
+            Run "yazi" {
+                floating true
+                close_on_exit true
+            }
+        }
     }
 }
 
