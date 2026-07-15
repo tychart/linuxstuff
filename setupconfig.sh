@@ -215,6 +215,29 @@ detect_package_manager() {
   fi
 }
 
+detect_system_bashrc_path() {
+  local id=''
+  local id_like=''
+
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    id="${ID:-}"
+    id_like="${ID_LIKE:-}"
+  fi
+
+  case " ${id} ${id_like} " in
+    *' ubuntu '*|*' debian '*)
+      printf '/etc/bash.bashrc'
+      ;;
+    *' rhel '*|*' fedora '*|*' centos '*|*' rocky '*|*' almalinux '*)
+      printf '/etc/bashrc'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 confirm_prompt() {
   local prompt="$1"
   local reply
@@ -311,6 +334,21 @@ ensure_dependencies() {
 
 ensure_dependencies
 
+SYSTEM_BASHRC_PATH=''
+SYSTEM_BASHRC_BLOCK=''
+if SYSTEM_BASHRC_PATH="$(detect_system_bashrc_path)"; then
+  log "Will source system Bash defaults from ${SYSTEM_BASHRC_PATH} before user customizations in ~/.bashrc"
+  SYSTEM_BASHRC_BLOCK=$(cat <<EOF
+# Source distro-provided Bash defaults before user customizations.
+if [ -r "${SYSTEM_BASHRC_PATH}" ]; then
+  . "${SYSTEM_BASHRC_PATH}"
+fi
+EOF
+)
+else
+  log "No known system Bash rc for this OS; leaving ~/.bashrc fully self-managed"
+fi
+
 PROFILE_CONTENT=$(cat <<'EOF'
 # Login shells read ~/.profile first, then pull in ~/.bashrc for interactive extras.
 # The guard avoids an infinite loop when ~/.bashrc later sources ~/.profile.
@@ -355,6 +393,7 @@ case $- in
   *) return ;;
 esac
 
+__SYSTEM_BASHRC_BLOCK__
 # Many terminals start Bash as a non-login shell, which skips ~/.profile.
 # If EDITOR is missing, source ~/.profile so this shell inherits the same defaults.
 if [ -z "${EDITOR:-}" ] && [ -r "$HOME/.profile" ]; then
@@ -523,6 +562,7 @@ bind -x '"\C-h": my_custom_backwards_kill_word'
 bind -x '"\C-w": my_custom_backwards_kill_word'
 EOF
 )
+BASHRC_CONTENT="${BASHRC_CONTENT/__SYSTEM_BASHRC_BLOCK__/$SYSTEM_BASHRC_BLOCK}"
 
 VIMRC_CONTENT=$(cat <<'EOF'
 set nocompatible
