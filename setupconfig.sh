@@ -569,6 +569,12 @@ set visualbell
 set laststatus=2
 set cursorline
 
+" Terminal cursor shapes: blinking block in Normal, blinking bar in Insert,
+" blinking underline in Replace. Terminal support may vary.
+let &t_SI = "\<Esc>[5 q"
+let &t_SR = "\<Esc>[3 q"
+let &t_EI = "\<Esc>[1 q"
+
 " Save undo history on disk so undo still works after reopening a file.
 if has('persistent_undo')
   set undodir=~/.vim/undodir
