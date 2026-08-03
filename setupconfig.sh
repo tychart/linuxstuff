@@ -387,6 +387,10 @@ EOF
 )
 
 BASHRC_CONTENT=$(cat <<'EOF'
+# Editor defaults should exist before any early return so child CLI tools inherit them.
+export EDITOR="${EDITOR:-__DEFAULT_EDITOR__}"
+export VISUAL="${VISUAL:-$EDITOR}"
+
 # Stop here for non-interactive shells.
 case $- in
   *i*) ;;
@@ -562,6 +566,7 @@ bind -x '"\C-h": my_custom_backwards_kill_word'
 bind -x '"\C-w": my_custom_backwards_kill_word'
 EOF
 )
+BASHRC_CONTENT="${BASHRC_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 BASHRC_CONTENT="${BASHRC_CONTENT/__SYSTEM_BASHRC_BLOCK__/$SYSTEM_BASHRC_BLOCK}"
 
 VIMRC_CONTENT=$(cat <<'EOF'
