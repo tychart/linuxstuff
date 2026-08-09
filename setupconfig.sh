@@ -17,6 +17,11 @@
 #     ~/.profile (custom-patched builds like zellij then win over distros)
 #   - Adds shell integration for them to the managed ~/.bashrc block: the y()
 #     yazi wrapper, the zellij `z` alias, and fzf keybindings/completion
+#   - Keeps the yazi (yazi.toml, theme.toml) and zellij (config.kdl) configs
+#     under ${XDG_CONFIG_HOME:-~/.config} in sync with the repo whenever the
+#     matching tool is installed (no prompt): a changed file rotates the
+#     previous copy to <name>.bak, then <name>.bak2, ... and an unchanged
+#     file is left alone, so reruns are quiet and idempotent
 #   - Nice-to-have installs prompt on the terminal, even when piped via
 #     `curl ... | bash` (the prompt opens /dev/tty). Fully non-interactive
 #     runs (cron, CI, ssh without a tty) skip instead, unless
@@ -519,9 +524,132 @@ ensure_nice_to_haves() {
   log "Nice-to-have tools present in ${dir}: ${present[*]:-none}"
 }
 
+# ---------------------------------------------------------------------------
+# Tool config files: yazi and zellij
+#
+# When a tool is installed (by this script into $NICE_TO_HAVE_BIN_DIR, or
+# already on PATH), keep its config under ${XDG_CONFIG_HOME:-~/.config} in
+# sync with the tychart/linuxstuff repo. Downloads go to a temp file first,
+# are verified, and are moved into place only after any previous file is
+# rotated to <name>.bak, then <name>.bak2, etc. Nothing happens when the
+# content is unchanged, so reruns are quiet and idempotent. The .bak files
+# are intentionally left alone by --cleanup-backups: they may pre-date this
+# script or be the user's own files.
+# ---------------------------------------------------------------------------
+
+# Raw-file base for configs on the default branch. Uses the canonical
+# raw.githubusercontent.com endpoint (one hop instead of github.com's
+# redirect to raw). The repo path is case-insensitive on GitHub.
+CONFIG_SOURCE_URL_BASE="https://raw.githubusercontent.com/tychart/linuxstuff/main"
+readonly CONFIG_SOURCE_URL_BASE
+
+tool_is_present() {
+  local tool="$1"
+
+  # Covers tools just installed by this script into ~/programs/bin (which is
+  # not on PATH until a new shell sources ~/.profile) and tools found on PATH.
+  [[ -x "$NICE_TO_HAVE_BIN_DIR/$tool" ]] || command -v "$tool" >/dev/null 2>&1
+}
+
+# Rotate an existing file out of the way: <file>.bak, then <file>.bak2,
+# <file>.bak3, ... taking the first free name.
+rotate_config_backup() {
+  local file="$1"
+  local backup="${file}.bak"
+  local n=1
+
+  while [[ -e $backup || -L $backup ]]; do
+    n=$((n + 1))
+    backup="${file}.bak${n}"
+  done
+
+  mv -f -- "$file" "$backup"
+  log "Rotated existing $file -> $backup"
+}
+
+# Fetch one config file and install it atomically. Ordering matters: the new
+# content is fully downloaded and validated before the existing file is
+# touched, so a failed download never costs the user their current config.
+install_one_config() {
+  local tool="$1"
+  local remote_path="$2"
+  local dest="$3"
+  local dir
+  local tmp
+  local url
+
+  if ! tool_is_present "$tool"; then
+    log "Skipping ${tool} config (${dest}): ${tool} binary not installed"
+    return 0
+  fi
+
+  url="${CONFIG_SOURCE_URL_BASE}/${remote_path}"
+  dir="$(dirname -- "$dest")"
+  mkdir -p -- "$dir"
+
+  # Remove stale partial downloads from any previously interrupted run.
+  shopt -s nullglob
+  rm -f -- "$dir"/.*.config.part.*
+  shopt -u nullglob
+
+  tmp="$(mktemp -- "$dir/.${tool}.config.part.XXXXXX")"
+  register_temp_file "$tmp"
+
+  if ! curl -fL --retry 3 -sS -o "$tmp" "$url"; then
+    rm -f -- "$tmp"
+    log "Failed to download ${url}; leaving any existing config untouched"
+    return 0
+  fi
+
+  if [[ ! -s $tmp ]]; then
+    rm -f -- "$tmp"
+    log "Downloaded ${url} is empty; not installing"
+    return 0
+  fi
+
+  # Cheap guard against HTML error pages served with a 200 status; none of
+  # these config formats starts with '<'.
+  if [[ $(head -c 1 -- "$tmp") == '<' ]]; then
+    rm -f -- "$tmp"
+    log "Downloaded ${url} looks like an HTML error page; not installing"
+    return 0
+  fi
+
+  # mktemp creates 0600 files; configs should be the usual 0644 before they
+  # are moved into place.
+  chmod 644 -- "$tmp"
+
+  if [[ -e $dest && ! -d $dest ]]; then
+    if cmp -s -- "$dest" "$tmp"; then
+      rm -f -- "$tmp"
+      log "${tool} config unchanged (${dest})"
+      return 0
+    fi
+    rotate_config_backup "$dest"
+  fi
+
+  mv -f -- "$tmp" "$dest"
+  log "Installed ${tool} config -> ${dest}"
+}
+
+install_tool_configs() {
+  local config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
+
+  if ! command -v curl >/dev/null 2>&1; then
+    log "curl not found; skipping yazi/zellij config installation"
+    return 0
+  fi
+
+  install_one_config yazi yazi/yazi.toml "$config_root/yazi/yazi.toml"
+  install_one_config yazi yazi/theme.toml "$config_root/yazi/theme.toml"
+  install_one_config zellij zellij/config.kdl "$config_root/zellij/config.kdl"
+}
+
 ensure_dependencies
 
 ensure_nice_to_haves
+
+install_tool_configs
 
 SYSTEM_BASHRC_PATH=''
 SYSTEM_BASHRC_BLOCK=''
