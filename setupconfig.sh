@@ -22,6 +22,9 @@
 #     matching tool is installed (no prompt): a changed file rotates the
 #     previous copy to <name>.bak, then <name>.bak2, ... and an unchanged
 #     file is left alone, so reruns are quiet and idempotent
+#   - Installs the tokyo-night yazi flavor once via 'ya pkg add' (yazi's own
+#     package manager) when the flavor files are missing, so the theme
+#     referenced by the managed theme.toml actually loads
 #   - Nice-to-have installs prompt on the terminal, even when piped via
 #     `curl ... | bash` (the prompt opens /dev/tty). Fully non-interactive
 #     runs (cron, CI, ssh without a tty) skip instead, unless
@@ -543,6 +546,12 @@ ensure_nice_to_haves() {
 CONFIG_SOURCE_URL_BASE="https://raw.githubusercontent.com/tychart/linuxstuff/main"
 readonly CONFIG_SOURCE_URL_BASE
 
+# Yazi flavor referenced by the managed theme.toml ([flavor] dark =
+# "tokyo-night"). The flavor is a ya package, not part of this repo, so it is
+# installed with yazi's own package manager.
+YAZI_TOKYO_NIGHT_PKG="BennyOe/tokyo-night"
+readonly YAZI_TOKYO_NIGHT_PKG
+
 tool_is_present() {
   local tool="$1"
 
@@ -632,6 +641,52 @@ install_one_config() {
   log "Installed ${tool} config -> ${dest}"
 }
 
+# Install the tokyo-night flavor with ya, but only when it is missing: ya
+# pkg add on an already-installed package is a no-op, so the flavor.toml
+# existence check (the exact file yazi reads at startup) keeps reruns free of
+# network traffic. Failures are warnings: the script should still succeed
+# even if the theme cannot be fetched right now.
+ensure_tokyo_night_flavor() {
+  local config_root="$1"
+  local flavor_toml="$config_root/yazi/flavors/tokyo-night.yazi/flavor.toml"
+  local ya_bin=''
+
+  if ! tool_is_present yazi; then
+    log "Skipping tokyo-night flavor: yazi binary not installed"
+    return 0
+  fi
+
+  if ! tool_is_present ya; then
+    log "Skipping tokyo-night flavor: ya (yazi package manager) not installed"
+    return 0
+  fi
+
+  if [[ -e $flavor_toml ]]; then
+    log "yazi tokyo-night flavor already installed (${flavor_toml})"
+    return 0
+  fi
+
+  # Prefer the ya this script installs into ~/programs/bin (not on PATH until
+  # a new shell sources ~/.profile); fall back to any ya on PATH.
+  if [[ -x "$NICE_TO_HAVE_BIN_DIR/ya" ]]; then
+    ya_bin="$NICE_TO_HAVE_BIN_DIR/ya"
+  else
+    ya_bin="$(command -v ya)"
+  fi
+
+  log "Installing yazi tokyo-night flavor via 'ya pkg add ${YAZI_TOKYO_NIGHT_PKG}'"
+  if ! "$ya_bin" pkg add "$YAZI_TOKYO_NIGHT_PKG"; then
+    log "Warning: 'ya pkg add ${YAZI_TOKYO_NIGHT_PKG}' failed; yazi theme may not load until it succeeds"
+    return 0
+  fi
+
+  if [[ -e $flavor_toml ]]; then
+    log "yazi tokyo-night flavor installed (${flavor_toml})"
+  else
+    log "Warning: 'ya pkg add ${YAZI_TOKYO_NIGHT_PKG}' reported success but ${flavor_toml} is still missing"
+  fi
+}
+
 install_tool_configs() {
   local config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
 
@@ -643,6 +698,8 @@ install_tool_configs() {
   install_one_config yazi yazi/yazi.toml "$config_root/yazi/yazi.toml"
   install_one_config yazi yazi/theme.toml "$config_root/yazi/theme.toml"
   install_one_config zellij zellij/config.kdl "$config_root/zellij/config.kdl"
+
+  ensure_tokyo_night_flavor "$config_root"
 }
 
 ensure_dependencies
