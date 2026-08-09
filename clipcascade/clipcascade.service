@@ -6,11 +6,10 @@ Wants=graphical-session.target
 [Service]
 Type=simple
 
-# Inherit the graphical environment
-Environment=GDK_BACKEND=x11
-Environment=CLIPCASCADE_FORCE_XWAYLAND=1
-
-ExecStart=/usr/bin/python3 /home/tychart/programs/ClipCascade/main.py
+ExecStart=/home/tychart/programs/ClipCascade/.venv/bin/python \
+    /home/tychart/programs/ClipCascade/main.py \
+    --xmode true \
+    --gui true
 
 Restart=on-failure
 
