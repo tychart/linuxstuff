@@ -11,15 +11,27 @@
 #   - Preserves user content outside those managed blocks
 #   - Avoids backups when only script-owned managed content is being refreshed
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
+#   - Optionally installs fzf, ya, yazi, and zellij into ~/programs/bin from
+#     the latest tychart/linuxstuff release: missing tools are downloaded via
+#     curl, the folder is created if needed, and it is added to PATH in
+#     ~/.profile (custom-patched builds like zellij then win over distros)
+#   - Adds shell integration for them to the managed ~/.bashrc block: the y()
+#     yazi wrapper, the zellij `z` alias, and fzf keybindings/completion
+#   - Nice-to-have installs prompt interactively; with no TTY they are skipped
+#     unless --install-optional is passed (auto-installs without prompting,
+#     which is also what you want for piped installs on a fresh machine)
 #
 # Usage:
 #   chmod +x setupconfig.sh
 #   ./setupconfig.sh
 #   ./setupconfig.sh --cleanup-backups
+#   ./setupconfig.sh --install-optional
+#   ./setupconfig.sh --cleanup-backups --install-optional
 #
 #   or
 #   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --cleanup-backups
+#   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --install-optional
 
 set -euo pipefail
 
@@ -28,6 +40,10 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
 # Single source of truth for the preferred editor written into ~/.profile.
 DEFAULT_EDITOR="vim"
+
+# When set (--install-optional), missing nice-to-have tools are installed
+# without prompting, even when the script runs without a TTY (e.g. piped).
+INSTALL_NICE_TO_HAVES=0
 
 PROFILE_FILE="$HOME/.profile"
 BASH_PROFILE_FILE="$HOME/.bash_profile"
@@ -48,6 +64,12 @@ show_usage() {
 Usage:
   ./setupconfig.sh
   ./setupconfig.sh --cleanup-backups
+  ./setupconfig.sh --install-optional
+
+  --cleanup-backups    remove backups created by previous runs
+  --install-optional   install missing nice-to-have tools (fzf, ya, yazi,
+                       zellij) into ~/programs/bin without prompting; also
+                       auto-installs when the script is piped (no TTY)
 EOF
 }
 
@@ -91,6 +113,10 @@ parse_args() {
       --cleanup-backups)
         cleanup_backups
         exit 0
+        ;;
+      --install-optional)
+        INSTALL_NICE_TO_HAVES=1
+        shift
         ;;
       -h|--help)
         show_usage
@@ -332,7 +358,139 @@ ensure_dependencies() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Optional ("nice to have") tools: fzf, ya, yazi, zellij
+#
+# These ship as release assets of the tychart/linuxstuff GitHub repo and are
+# installed to ~/programs/bin so custom-patched builds (e.g. the patched
+# zellij) take precedence over distro packages. Only tools missing from that
+# folder are downloaded; the folder is created up front and always added to
+# PATH via the managed ~/.profile block.
+# ---------------------------------------------------------------------------
+
+NICE_TO_HAVE_REPO="tychart/linuxstuff"
+# Used only when the GitHub API cannot be reached to resolve the latest tag.
+NICE_TO_HAVE_FALLBACK_TAG="v1.0.0"
+NICE_TO_HAVE_BIN_DIR="$HOME/programs/bin"
+# Names here are both the release asset names and the installed binary names.
+NICE_TO_HAVE_TOOLS=(fzf ya yazi zellij)
+
+# Cheap ELF check that needs no extra tools: real binaries start with the 4
+# magic bytes 0x7f 'E' 'L' 'F'. Catches HTML error pages and truncated or
+# corrupt downloads without requiring the `file` command.
+is_elf_binary() {
+  [ "$(head -c 4 -- "$1" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')" = "7f454c46" ]
+}
+
+# Resolve the newest release tag via the GitHub API, with a local fallback
+# tag when the API is unreachable or rate-limited.
+fetch_latest_release_tag() {
+  local api_url="https://api.github.com/repos/${NICE_TO_HAVE_REPO}/releases/latest"
+  local tag
+
+  if tag="$(curl -fsSL --max-time 20 "$api_url" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)" && [ -n "$tag" ]; then
+    printf '%s' "$tag"
+    return 0
+  fi
+
+  # Warn on stderr so the message is not captured by callers using
+  # command substitution (e.g. tag="$(fetch_latest_release_tag)").
+  printf '[setup] Could not query GitHub API for the latest %s release; falling back to %s\n' "$NICE_TO_HAVE_REPO" "$NICE_TO_HAVE_FALLBACK_TAG" >&2
+  printf '%s' "$NICE_TO_HAVE_FALLBACK_TAG"
+}
+
+ensure_nice_to_haves() {
+  local dir="$NICE_TO_HAVE_BIN_DIR"
+  local missing=()
+  local tool
+  local tag
+  local url
+  local dest
+  local tmp
+  local version
+  local present=()
+
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir"
+    log "Created $dir (nice-to-have binaries will be installed here)"
+  fi
+
+  # Remove stale partial downloads from any previously interrupted run.
+  shopt -s nullglob
+  rm -f -- "$dir"/.*.part.*
+  shopt -u nullglob
+
+  for tool in "${NICE_TO_HAVE_TOOLS[@]}"; do
+    dest="$dir/$tool"
+    if [ -s "$dest" ] && is_elf_binary "$dest"; then
+      chmod +x -- "$dest" 2>/dev/null || true
+      log "Nice-to-have '$tool' already installed ($dest)"
+    else
+      if [ -e "$dest" ]; then
+        log "Nice-to-have '$tool' exists at $dest but is empty or not a valid ELF binary; re-downloading"
+      fi
+      missing+=("$tool")
+    fi
+  done
+
+  if [ "${#missing[@]}" -eq 0 ]; then
+    log "All nice-to-have tools present in $dir"
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    log "curl is required to install missing nice-to-have tools (${missing[*]}); skipping"
+    return 0
+  fi
+
+  log "Nice-to-have tools missing from $dir: ${missing[*]}"
+
+  if [ "$INSTALL_NICE_TO_HAVES" != 1 ] && ! confirm_prompt "Download and install the missing nice-to-have tools?"; then
+    log "Skipping nice-to-have tool installation at user request."
+    log "Re-run with --install-optional to install them without prompting (also works when piped)."
+    return 0
+  fi
+
+  tag="$(fetch_latest_release_tag)"
+  log "Installing from release ${tag}"
+
+  for tool in "${missing[@]}"; do
+    dest="$dir/$tool"
+    tmp="$(mktemp "${dir}/.${tool}.part.XXXXXX")"
+    url="https://github.com/${NICE_TO_HAVE_REPO}/releases/download/${tag}/${tool}"
+
+    if ! curl -fL --retry 3 --progress-bar -o "$tmp" "$url"; then
+      rm -f -- "$tmp"
+      log "Failed to download ${tool} from ${url}"
+      continue
+    fi
+
+    if ! is_elf_binary "$tmp"; then
+      rm -f -- "$tmp"
+      log "Downloaded ${tool} is not a valid ELF binary (from ${url}); not installing"
+      continue
+    fi
+
+    chmod 755 -- "$tmp"
+    mv -f -- "$tmp" "$dest"
+    log "Installed ${tool} -> ${dest} (release ${tag})"
+
+    if version="$("$dest" --version 2>/dev/null | head -n 1)" && [ -n "$version" ]; then
+      log "  ${tool} version: ${version}"
+    else
+      log "  Warning: ${tool} installed but its --version smoke test failed"
+    fi
+  done
+
+  for tool in "${NICE_TO_HAVE_TOOLS[@]}"; do
+    [ -x "$dir/$tool" ] && present+=("$tool")
+  done
+  log "Nice-to-have tools present in ${dir}: ${present[*]:-none}"
+}
+
 ensure_dependencies
+
+ensure_nice_to_haves
 
 SYSTEM_BASHRC_PATH=''
 SYSTEM_BASHRC_BLOCK=''
@@ -358,8 +516,11 @@ if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ] && [ -z "${__TYCHART_SOU
   esac
 fi
 
-# Prefer user-local bin directories when they exist.
-for dir in "$HOME/.local/bin" "$HOME/bin"; do
+# Prefer user-local bin directories when they exist. Directories are
+# prepended in reverse list order, so the last entry (~/programs/bin) ends
+# up first: custom-patched builds (patched zellij, etc.) win over distro
+# packages. Missing directories are skipped so broken entries stay off PATH.
+for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/programs/bin"; do
   if [ -d "$dir" ]; then
     case ":$PATH:" in
       *":$dir:"*) ;;
@@ -367,6 +528,23 @@ for dir in "$HOME/.local/bin" "$HOME/bin"; do
     esac
   fi
 done
+
+# Collapse duplicate entries left over from older profiles while keeping the
+# first occurrence, so the precedence above is preserved.
+__tychart_dedupe_path() {
+  local result='' entry
+  local IFS=':'
+  for entry in $PATH; do
+    [ -z "$entry" ] && continue
+    case ":$result:" in
+      *":$entry:"*) ;;
+      *) result="${result:+$result:}$entry" ;;
+    esac
+  done
+  printf '%s' "$result"
+}
+PATH="$(__tychart_dedupe_path)"
+unset -f __tychart_dedupe_path
 export PATH
 
 # Editor defaults live here so other tools can simply inherit them.
@@ -397,10 +575,19 @@ case $- in
   *) return ;;
 esac
 
+# ~/.profile sources this file back, both in its managed block and in
+# preserved user content. If we are already inside such a source, stop:
+# everything below was already defined by the outer pass. Without this the
+# two files would source each other forever and every shell would hang.
+if [ -n "${__TYCHART_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
+  return
+fi
+
 __SYSTEM_BASHRC_BLOCK__
 # Many terminals start Bash as a non-login shell, which skips ~/.profile.
-# If EDITOR is missing, source ~/.profile so this shell inherits the same defaults.
-if [ -z "${EDITOR:-}" ] && [ -r "$HOME/.profile" ]; then
+# Source it here so PATH and editor defaults are consistent in every shell.
+# The guard prevents recursion because ~/.profile sources this file back.
+if [ -r "$HOME/.profile" ]; then
   __TYCHART_SOURCING_PROFILE_FROM_BASHRC=1
   . "$HOME/.profile"
   unset __TYCHART_SOURCING_PROFILE_FROM_BASHRC
@@ -442,6 +629,12 @@ elif [ -r /etc/bash_completion.d/git ]; then
   . /etc/bash_completion.d/git
 fi
 
+# fzf integration (Ctrl-T/Ctrl-R/Alt-C keybindings and completion). Guarded so
+# shells stay quiet when fzf is not installed yet (it is a nice-to-have).
+if command -v fzf >/dev/null 2>&1; then
+  eval "$(fzf --bash)"
+fi
+
 # Aliases.
 alias ..='cd ..'
 alias ...='cd ../..'
@@ -457,6 +650,7 @@ alias ver='cat /etc/*-release'
 alias vim='vim -u "$HOME/.vimrc"'
 alias whoson='last -w | tac'
 alias details='get_machine_info'
+alias z='zellij attach -c main'
 
 # Functions.
 mmkdir() {
@@ -512,6 +706,15 @@ get_os_short() {
 ssu() {
   # Preserve your HOME and rc setup when opening a root shell.
   sudo --preserve-env=HOME env HOME="$HOME" bash --rcfile "$HOME/.bashrc" -i
+}
+
+y() {
+  # Open yazi and change to the directory it left us in on exit.
+  local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
+  command yazi "$@" --cwd-file="$tmp"
+  IFS= read -r -d '' cwd < "$tmp"
+  [ "$cwd" != "$PWD" ] && [ -d "$cwd" ] && builtin cd -- "$cwd"
+  command rm -f -- "$tmp"
 }
 
 # Prompt.
@@ -885,5 +1088,5 @@ if command -v git >/dev/null 2>&1; then
   git config --global alias.lg "log --graph --all --decorate --pretty=format:'%C(blue)%h%Creset%C(yellow)%d%Creset %s %C(blue)%an%Creset %C(green)(%ar)%Creset'"
 fi
 
-log "Done. Open a new shell or run: source ~/.profile"
+log "Done. Open a new shell (or run: source ~/.profile) to pick up PATH changes."
 log "If Vim is already open, restart it to load updated config/plugin."
