@@ -17,9 +17,10 @@
 #     ~/.profile (custom-patched builds like zellij then win over distros)
 #   - Adds shell integration for them to the managed ~/.bashrc block: the y()
 #     yazi wrapper, the zellij `z` alias, and fzf keybindings/completion
-#   - Nice-to-have installs prompt interactively; with no TTY they are skipped
-#     unless --install-optional is passed (auto-installs without prompting,
-#     which is also what you want for piped installs on a fresh machine)
+#   - Nice-to-have installs prompt on the terminal, even when piped via
+#     `curl ... | bash` (the prompt opens /dev/tty). Fully non-interactive
+#     runs (cron, CI, ssh without a tty) skip instead, unless
+#     --install-optional is passed, which auto-installs without prompting
 #
 # Usage:
 #   chmod +x setupconfig.sh
@@ -36,14 +37,13 @@
 set -euo pipefail
 
 SCRIPT_TAG="tychart-setup"
+readonly SCRIPT_TAG
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+readonly TIMESTAMP
 
 # Single source of truth for the preferred editor written into ~/.profile.
 DEFAULT_EDITOR="vim"
-
-# When set (--install-optional), missing nice-to-have tools are installed
-# without prompting, even when the script runs without a TTY (e.g. piped).
-INSTALL_NICE_TO_HAVES=0
+readonly DEFAULT_EDITOR
 
 PROFILE_FILE="$HOME/.profile"
 BASH_PROFILE_FILE="$HOME/.bash_profile"
@@ -54,6 +54,19 @@ VIM_DIR="$HOME/.vim"
 VIM_PLUGIN_DIR="$VIM_DIR/plugin"
 VIM_UNDO_DIR="$VIM_DIR/undodir"
 OSCYANK_FILE="$VIM_PLUGIN_DIR/oscyank.vim"
+readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE VIMRC_FILE INPUTRC_FILE
+readonly VIM_DIR VIM_PLUGIN_DIR VIM_UNDO_DIR OSCYANK_FILE
+
+# When set (--install-optional), missing nice-to-have tools are installed
+# without prompting, even when the script runs without a TTY (e.g. piped).
+INSTALL_NICE_TO_HAVES=0
+
+# Remove temporary files on exit, including when set -e aborts mid-run.
+TEMP_FILES=()
+trap 'rm -f -- "${TEMP_FILES[@]}" 2>/dev/null || true' EXIT
+register_temp_file() {
+  TEMP_FILES+=("$1")
+}
 
 log() {
   printf '[setup] %s\n' "$*"
@@ -68,8 +81,8 @@ Usage:
 
   --cleanup-backups    remove backups created by previous runs
   --install-optional   install missing nice-to-have tools (fzf, ya, yazi,
-                       zellij) into ~/programs/bin without prompting; also
-                       auto-installs when the script is piped (no TTY)
+                       zellij) into ~/programs/bin without prompting, even
+                       in fully non-interactive runs (cron, CI, ssh -c)
 EOF
 }
 
@@ -100,7 +113,7 @@ cleanup_backups() {
 
   shopt -u nullglob
 
-  if [ "$count" -eq 0 ]; then
+  if [[ $count -eq 0 ]]; then
     log "No setupconfig backup files found."
   else
     log "Removed $count backup file(s)."
@@ -108,7 +121,7 @@ cleanup_backups() {
 }
 
 parse_args() {
-  while [ "$#" -gt 0 ]; do
+  while [[ $# -gt 0 ]]; do
     case "$1" in
       --cleanup-backups)
         cleanup_backups
@@ -139,12 +152,12 @@ backup_file() {
   local dir
   local base
 
-  [ -e "$file" ] || return 0
+  [[ -e $file ]] || return 0
 
   dir="$(dirname "$file")"
   base="$(basename "$file")"
   backup="${dir}/setupconfig_backup_${base}.${TIMESTAMP}"
-  if [ ! -e "$backup" ]; then
+  if [[ ! -e $backup ]]; then
     cp -a -- "$file" "$backup"
     log "Backed up $file -> $backup"
   fi
@@ -169,9 +182,11 @@ upsert_managed_block() {
 
   mkdir -p "$(dirname "$file")"
   tmp="$(mktemp)"
+  register_temp_file "$tmp"
   preserved_tmp="$(mktemp)"
+  register_temp_file "$preserved_tmp"
 
-  if [ -f "$file" ]; then
+  if [[ -f $file ]]; then
     awk \
       -v start="$start_marker" \
       -v end="$end_marker" \
@@ -190,16 +205,16 @@ upsert_managed_block() {
   {
     printf '%s\n%s\n%s\n' "$start_marker" "$content" "$end_marker"
 
-    if [ -s "$preserved_tmp" ]; then
+    if [[ -s $preserved_tmp ]]; then
       IFS= read -r first_preserved_line < "$preserved_tmp" || true
-      if [ -n "$first_preserved_line" ]; then
+      if [[ -n $first_preserved_line ]]; then
         printf '\n'
       fi
       cat "$preserved_tmp"
     fi
   } > "$tmp"
 
-  if [ -f "$file" ] && cmp -s "$file" "$tmp"; then
+  if [[ -f $file ]] && cmp -s "$file" "$tmp"; then
     rm -f "$tmp" "$preserved_tmp"
     log "Managed block '$name' unchanged in $file"
     return 0
@@ -217,9 +232,10 @@ write_managed_file() {
 
   mkdir -p "$(dirname "$file")"
   tmp="$(mktemp)"
+  register_temp_file "$tmp"
   printf '%s\n' "$content" > "$tmp"
 
-  if [ -f "$file" ] && cmp -s "$file" "$tmp"; then
+  if [[ -f $file ]] && cmp -s "$file" "$tmp"; then
     rm -f "$tmp"
     log "$file unchanged"
     return 0
@@ -245,7 +261,7 @@ detect_system_bashrc_path() {
   local id=''
   local id_like=''
 
-  if [ -r /etc/os-release ]; then
+  if [[ -r /etc/os-release ]]; then
     . /etc/os-release
     id="${ID:-}"
     id_like="${ID_LIKE:-}"
@@ -266,34 +282,77 @@ detect_system_bashrc_path() {
 
 confirm_prompt() {
   local prompt="$1"
-  local reply
+  local reply=''
+  local use_tty=false
 
-  if [ ! -t 0 ]; then
-    return 1
+  if [[ ! -t 0 ]]; then
+    # stdin is not a terminal (e.g. `curl ... | bash` feeds the script
+    # through a pipe): prompt on the controlling terminal instead. If there
+    # is no controlling terminal (cron, CI, ssh without a tty), this run is
+    # truly non-interactive and cannot prompt. Never redirect fd 0 itself:
+    # a piped script is still being read from stdin.
+    if ( exec 0< /dev/tty ) 2>/dev/null; then
+      use_tty=true
+    else
+      return 1
+    fi
   fi
 
-  printf '%s [y/N]: ' "$prompt"
-  read -r reply
+  printf '%s [y/N]: ' "$prompt" >&2
+  if [[ $use_tty == true ]]; then
+    read -r reply < /dev/tty || reply=''
+  else
+    read -r reply || reply=''
+  fi
+
   case "$reply" in
     y|Y|yes|YES) return 0 ;;
     *) return 1 ;;
   esac
 }
 
+# Map a generic dependency name to the actual package name for a package
+# manager. Keeps the per-package-manager mapping in one place.
+package_name_for() {
+  local pm="$1" dep="$2"
+
+  case "$pm:$dep" in
+    *:git)             printf 'git' ;;
+    *:bash-completion) printf 'bash-completion' ;;
+    apt:vim)           printf 'vim' ;;
+    dnf:vim|yum:vim)   printf 'vim-enhanced' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Run the actual install for the detected package manager.
+install_packages() {
+  local pm="$1"
+  shift
+
+  case "$pm" in
+    apt) sudo apt-get update && sudo apt-get install -y "$@" ;;
+    dnf) sudo dnf install -y "$@" ;;
+    yum) sudo yum install -y "$@" ;;
+  esac
+}
+
 ensure_dependencies() {
   local missing=()
   local pm
-  local install_cmd=()
   local packages=()
+  local dep
+  local pkg
+  local display_cmd=''
 
   command -v git >/dev/null 2>&1 || missing+=(git)
   command -v vim >/dev/null 2>&1 || missing+=(vim)
 
-  if ! { [ -r /usr/share/bash-completion/bash_completion ] || [ -r /etc/bash_completion ]; }; then
+  if ! { [[ -r /usr/share/bash-completion/bash_completion ]] || [[ -r /etc/bash_completion ]]; }; then
     missing+=(bash-completion)
   fi
 
-  if [ "${#missing[@]}" -eq 0 ]; then
+  if [[ ${#missing[@]} -eq 0 ]]; then
     return 0
   fi
 
@@ -303,56 +362,24 @@ ensure_dependencies() {
     return 0
   fi
 
+  for dep in "${missing[@]}"; do
+    if pkg="$(package_name_for "$pm" "$dep")"; then
+      packages+=("$pkg")
+    fi
+  done
+
   case "$pm" in
-    apt)
-      for dep in "${missing[@]}"; do
-        case "$dep" in
-          git) packages+=(git) ;;
-          vim) packages+=(vim) ;;
-          bash-completion) packages+=(bash-completion) ;;
-        esac
-      done
-      install_cmd=(sudo apt-get update '&&' sudo apt-get install -y "${packages[@]}")
-      ;;
-    dnf)
-      for dep in "${missing[@]}"; do
-        case "$dep" in
-          git) packages+=(git) ;;
-          vim) packages+=(vim-enhanced) ;;
-          bash-completion) packages+=(bash-completion) ;;
-        esac
-      done
-      install_cmd=(sudo dnf install -y "${packages[@]}")
-      ;;
-    yum)
-      for dep in "${missing[@]}"; do
-        case "$dep" in
-          git) packages+=(git) ;;
-          vim) packages+=(vim-enhanced) ;;
-          bash-completion) packages+=(bash-completion) ;;
-        esac
-      done
-      install_cmd=(sudo yum install -y "${packages[@]}")
-      ;;
+    apt) display_cmd="sudo apt-get update && sudo apt-get install -y ${packages[*]}" ;;
+    dnf) display_cmd="sudo dnf install -y ${packages[*]}" ;;
+    yum) display_cmd="sudo yum install -y ${packages[*]}" ;;
   esac
 
   log "Missing dependencies detected: ${missing[*]}"
   printf '\n[setup] The script can install them for you using:\n'
-  printf '  %s\n\n' "${install_cmd[*]}"
+  printf '  %s\n\n' "$display_cmd"
 
   if confirm_prompt "Do you want to run that install command?"; then
-    case "$pm" in
-      apt)
-        sudo apt-get update
-        sudo apt-get install -y "${packages[@]}"
-        ;;
-      dnf)
-        sudo dnf install -y "${packages[@]}"
-        ;;
-      yum)
-        sudo yum install -y "${packages[@]}"
-        ;;
-    esac
+    install_packages "$pm" "${packages[@]}"
   else
     log "Skipping dependency installation at user request."
   fi
@@ -374,12 +401,15 @@ NICE_TO_HAVE_FALLBACK_TAG="v1.0.0"
 NICE_TO_HAVE_BIN_DIR="$HOME/programs/bin"
 # Names here are both the release asset names and the installed binary names.
 NICE_TO_HAVE_TOOLS=(fzf ya yazi zellij)
+readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR NICE_TO_HAVE_TOOLS
 
 # Cheap ELF check that needs no extra tools: real binaries start with the 4
 # magic bytes 0x7f 'E' 'L' 'F'. Catches HTML error pages and truncated or
 # corrupt downloads without requiring the `file` command.
 is_elf_binary() {
-  [ "$(head -c 4 -- "$1" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')" = "7f454c46" ]
+  local magic
+  magic="$(head -c 4 -- "$1" 2>/dev/null)"
+  [[ "$magic" == $'\x7fELF' ]]
 }
 
 # Resolve the newest release tag via the GitHub API, with a local fallback
@@ -388,7 +418,7 @@ fetch_latest_release_tag() {
   local api_url="https://api.github.com/repos/${NICE_TO_HAVE_REPO}/releases/latest"
   local tag
 
-  if tag="$(curl -fsSL --max-time 20 "$api_url" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)" && [ -n "$tag" ]; then
+  if tag="$(curl -fsSL --max-time 20 "$api_url" 2>/dev/null | LC_ALL=C sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)" && [[ -n $tag ]]; then
     printf '%s' "$tag"
     return 0
   fi
@@ -410,7 +440,7 @@ ensure_nice_to_haves() {
   local version
   local present=()
 
-  if [ ! -d "$dir" ]; then
+  if [[ ! -d $dir ]]; then
     mkdir -p "$dir"
     log "Created $dir (nice-to-have binaries will be installed here)"
   fi
@@ -422,18 +452,18 @@ ensure_nice_to_haves() {
 
   for tool in "${NICE_TO_HAVE_TOOLS[@]}"; do
     dest="$dir/$tool"
-    if [ -s "$dest" ] && is_elf_binary "$dest"; then
+    if [[ -s $dest ]] && is_elf_binary "$dest"; then
       chmod +x -- "$dest" 2>/dev/null || true
       log "Nice-to-have '$tool' already installed ($dest)"
     else
-      if [ -e "$dest" ]; then
+      if [[ -e $dest ]]; then
         log "Nice-to-have '$tool' exists at $dest but is empty or not a valid ELF binary; re-downloading"
       fi
       missing+=("$tool")
     fi
   done
 
-  if [ "${#missing[@]}" -eq 0 ]; then
+  if [[ ${#missing[@]} -eq 0 ]]; then
     log "All nice-to-have tools present in $dir"
     return 0
   fi
@@ -445,9 +475,9 @@ ensure_nice_to_haves() {
 
   log "Nice-to-have tools missing from $dir: ${missing[*]}"
 
-  if [ "$INSTALL_NICE_TO_HAVES" != 1 ] && ! confirm_prompt "Download and install the missing nice-to-have tools?"; then
-    log "Skipping nice-to-have tool installation at user request."
-    log "Re-run with --install-optional to install them without prompting (also works when piped)."
+  if [[ $INSTALL_NICE_TO_HAVES != 1 ]] && ! confirm_prompt "Download and install the missing nice-to-have tools?"; then
+    log "Skipping nice-to-have tool installation."
+    log "Re-run with --install-optional to install without prompting (also works in cron/CI)."
     return 0
   fi
 
@@ -457,6 +487,7 @@ ensure_nice_to_haves() {
   for tool in "${missing[@]}"; do
     dest="$dir/$tool"
     tmp="$(mktemp "${dir}/.${tool}.part.XXXXXX")"
+    register_temp_file "$tmp"
     url="https://github.com/${NICE_TO_HAVE_REPO}/releases/download/${tag}/${tool}"
 
     if ! curl -fL --retry 3 --progress-bar -o "$tmp" "$url"; then
@@ -475,7 +506,7 @@ ensure_nice_to_haves() {
     mv -f -- "$tmp" "$dest"
     log "Installed ${tool} -> ${dest} (release ${tag})"
 
-    if version="$("$dest" --version 2>/dev/null | head -n 1)" && [ -n "$version" ]; then
+    if version="$("$dest" --version 2>/dev/null | head -n 1)" && [[ -n $version ]]; then
       log "  ${tool} version: ${version}"
     else
       log "  Warning: ${tool} installed but its --version smoke test failed"
@@ -483,7 +514,7 @@ ensure_nice_to_haves() {
   done
 
   for tool in "${NICE_TO_HAVE_TOOLS[@]}"; do
-    [ -x "$dir/$tool" ] && present+=("$tool")
+    [[ -x $dir/$tool ]] && present+=("$tool")
   done
   log "Nice-to-have tools present in ${dir}: ${present[*]:-none}"
 }
