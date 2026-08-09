@@ -1,0 +1,20 @@
+keybinds {
+    normal {
+        bind "Ctrl c" { SmartCopy; }
+    }
+
+    scroll {
+        bind "Ctrl c" { SmartCopy; }
+    }
+
+    shared_except "locked" {
+        bind "Alt y" {
+            Run "yazi" {
+                floating true
+                close_on_exit true
+            }
+        }
+    }
+}
+
+copy_on_select false
