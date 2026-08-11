@@ -933,6 +933,20 @@ y() {
   command rm -f -- "$tmp"
 }
 
+
+osc52() {
+    local data
+
+    if [ $# -gt 0 ]; then
+        data="$*"
+    else
+        data="$(cat)"
+    fi
+
+    printf '\033]52;c;%s\a' \
+        "$(printf '%s' "$data" | base64 -w0)"
+}
+
 # Prompt.
 # NOTE: You mentioned you may replace this later with Starship.
 # This section is intentionally isolated so it is easy to remove/swap.
