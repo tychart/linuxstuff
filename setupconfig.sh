@@ -11,8 +11,9 @@
 #   - Preserves user content outside those managed blocks
 #   - Avoids backups when only script-owned managed content is being refreshed
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
-#   - Optionally installs fzf, ya, yazi, and zellij into ~/programs/bin, plus
-#     blesh into ~/programs/blesh, from the latest tychart/linuxstuff release:
+#   - Optionally installs fzf, bat, eza, ya, yazi, and zellij into
+#     ~/programs/bin, plus blesh into ~/programs/blesh, from the latest
+#     tychart/linuxstuff release:
 #     missing tools are downloaded via
 #     curl, the folder is created if needed, and it is added to PATH in
 #     ~/.profile (custom-patched builds like zellij then win over distros)
@@ -90,8 +91,8 @@ Usage:
   ./setupconfig.sh --install-optional
 
   --cleanup-backups    remove backups created by previous runs
-  --install-optional   install missing nice-to-have tools (fzf, ya, yazi,
-                       zellij, blesh) without prompting, even
+  --install-optional   install missing nice-to-have tools (fzf, bat, eza, ya,
+                       yazi, zellij, blesh) without prompting, even
                        in fully non-interactive runs (cron, CI, ssh -c)
 EOF
 }
@@ -396,7 +397,7 @@ ensure_dependencies() {
 }
 
 # ---------------------------------------------------------------------------
-# Optional ("nice to have") tools: fzf, ya, yazi, zellij
+# Optional ("nice to have") tools: fzf, bat, eza, ya, yazi, zellij
 #
 # These ship as release assets of the tychart/linuxstuff GitHub repo and are
 # installed to ~/programs/bin so custom-patched builds (e.g. the patched
@@ -410,7 +411,7 @@ NICE_TO_HAVE_REPO="tychart/linuxstuff"
 NICE_TO_HAVE_FALLBACK_TAG="v1.0.0"
 NICE_TO_HAVE_BIN_DIR="$HOME/programs/bin"
 # Names here are both the release asset names and the installed binary names.
-NICE_TO_HAVE_TOOLS=(fzf ya yazi zellij)
+NICE_TO_HAVE_TOOLS=(fzf bat eza ya yazi zellij)
 readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR NICE_TO_HAVE_TOOLS
 
 # blesh is a prebuilt, architecture-independent release asset.  Its directory
@@ -995,6 +996,25 @@ if command -v fzf >/dev/null 2>&1; then
   fi
 fi
 
+# Tool integrations. Each optional integration is guarded so a missing
+# user-local binary never creates a broken alias or pager configuration.
+if command -v eza >/dev/null 2>&1; then
+  alias ll='eza -lag --git --icons --group-directories-first'
+else
+  alias ll='ls -lah --color=auto --group-directories-first'
+fi
+
+if command -v bat >/dev/null 2>&1; then
+  alias b='bat'
+
+  # bat's direct man-page mode preserves groff formatting and adds readable
+  # syntax colors. Avoid pre-processing through col: it can corrupt ANSI
+  # sequences on modern man implementations.
+  if command -v man >/dev/null 2>&1; then
+    export MANPAGER='bat --plain --language=man'
+  fi
+fi
+
 # Aliases.
 alias ..='cd ..'
 alias ...='cd ../..'
@@ -1002,7 +1022,6 @@ alias ....='cd ../../..'
 alias .....='cd ../../../..'
 alias c='clear'
 alias k='kubectl'
-alias ll='ls -lah --color=auto --group-directories-first'
 alias myip='hostname -I 2>/dev/null | awk "{print \$1}"'
 alias src='source "$HOME/.profile"'
 alias venv='source .venv/bin/activate'
