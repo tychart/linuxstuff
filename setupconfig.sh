@@ -11,8 +11,9 @@
 #   - Preserves user content outside those managed blocks
 #   - Avoids backups when only script-owned managed content is being refreshed
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
-#   - Optionally installs fzf, ya, yazi, and zellij into ~/programs/bin from
-#     the latest tychart/linuxstuff release: missing tools are downloaded via
+#   - Optionally installs fzf, ya, yazi, and zellij into ~/programs/bin, plus
+#     blesh into ~/programs/blesh, from the latest tychart/linuxstuff release:
+#     missing tools are downloaded via
 #     curl, the folder is created if needed, and it is added to PATH in
 #     ~/.profile (custom-patched builds like zellij then win over distros)
 #   - Adds shell integration for them to the managed ~/.bashrc block: the y()
@@ -58,11 +59,12 @@ BASH_PROFILE_FILE="$HOME/.bash_profile"
 BASHRC_FILE="$HOME/.bashrc"
 VIMRC_FILE="$HOME/.vimrc"
 INPUTRC_FILE="$HOME/.inputrc"
+BLERC_FILE="$HOME/.blerc"
 VIM_DIR="$HOME/.vim"
 VIM_PLUGIN_DIR="$VIM_DIR/plugin"
 VIM_UNDO_DIR="$VIM_DIR/undodir"
 OSCYANK_FILE="$VIM_PLUGIN_DIR/oscyank.vim"
-readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE VIMRC_FILE INPUTRC_FILE
+readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE VIMRC_FILE INPUTRC_FILE BLERC_FILE
 readonly VIM_DIR VIM_PLUGIN_DIR VIM_UNDO_DIR OSCYANK_FILE
 
 # When set (--install-optional), missing nice-to-have tools are installed
@@ -89,7 +91,7 @@ Usage:
 
   --cleanup-backups    remove backups created by previous runs
   --install-optional   install missing nice-to-have tools (fzf, ya, yazi,
-                       zellij) into ~/programs/bin without prompting, even
+                       zellij, blesh) without prompting, even
                        in fully non-interactive runs (cron, CI, ssh -c)
 EOF
 }
@@ -411,6 +413,14 @@ NICE_TO_HAVE_BIN_DIR="$HOME/programs/bin"
 NICE_TO_HAVE_TOOLS=(fzf ya yazi zellij)
 readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR NICE_TO_HAVE_TOOLS
 
+# blesh is a prebuilt, architecture-independent release asset.  Its directory
+# must retain the files adjacent to ble.sh (especially lib/ and contrib/), so
+# it is installed as a directory rather than alongside the executable tools.
+BLSH_ASSET_NAME="blesh.tar.gz"
+BLSH_INSTALL_DIR="$HOME/programs/blesh"
+BLSH_RELEASE_MARKER="$BLSH_INSTALL_DIR/.linuxstuff-release"
+readonly BLSH_ASSET_NAME BLSH_INSTALL_DIR BLSH_RELEASE_MARKER
+
 # Cheap ELF check that needs no extra tools: real binaries start with the 4
 # magic bytes 0x7f 'E' 'L' 'F'. Catches HTML error pages and truncated or
 # corrupt downloads without requiring the `file` command.
@@ -420,19 +430,27 @@ is_elf_binary() {
   [[ "$magic" == $'\x7fELF' ]]
 }
 
-# Resolve the newest release tag via the GitHub API, with a local fallback
-# tag when the API is unreachable or rate-limited.
-fetch_latest_release_tag() {
+# Resolve the newest release tag via the GitHub API.  Callers that only need
+# a best-effort install can use the fallback wrapper below; callers deciding
+# whether to replace an existing installation must not guess a release tag.
+fetch_current_release_tag() {
   local api_url="https://api.github.com/repos/${NICE_TO_HAVE_REPO}/releases/latest"
   local tag
 
-  if tag="$(curl -fsSL --max-time 20 "$api_url" 2>/dev/null | LC_ALL=C sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)" && [[ -n $tag ]]; then
-    printf '%s' "$tag"
+  tag="$(curl -fsSL --max-time 20 "$api_url" 2>/dev/null | LC_ALL=C sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)" || return 1
+  [[ -n $tag ]] || return 1
+  printf '%s' "$tag"
+}
+
+# The standalone binary installer can safely try its known initial release
+# when GitHub's API is temporarily unavailable.
+fetch_latest_release_tag() {
+  if fetch_current_release_tag; then
     return 0
   fi
 
-  # Warn on stderr so the message is not captured by callers using
-  # command substitution (e.g. tag="$(fetch_latest_release_tag)").
+  # Warn on stderr so the message is not captured by callers using command
+  # substitution (e.g. tag="$(fetch_latest_release_tag)").
   printf '[setup] Could not query GitHub API for the latest %s release; falling back to %s\n' "$NICE_TO_HAVE_REPO" "$NICE_TO_HAVE_FALLBACK_TAG" >&2
   printf '%s' "$NICE_TO_HAVE_FALLBACK_TAG"
 }
@@ -525,6 +543,118 @@ ensure_nice_to_haves() {
     [[ -x $dir/$tool ]] && present+=("$tool")
   done
   log "Nice-to-have tools present in ${dir}: ${present[*]:-none}"
+}
+
+# ---------------------------------------------------------------------------
+# Optional blesh installation
+#
+# Unlike the single-file ELF tools above, blesh must keep ble.sh together with
+# its lib/ and contrib/ directories. Each LinuxStuff release publishes a tar
+# of the complete build output, with out/ as its top-level directory.
+# ---------------------------------------------------------------------------
+
+blesh_is_installed() {
+  [[ -r "$BLSH_INSTALL_DIR/ble.sh" && -d "$BLSH_INSTALL_DIR/lib" ]]
+}
+
+blesh_installed_release_tag() {
+  local tag=''
+
+  [[ -r $BLSH_RELEASE_MARKER ]] || return 1
+  IFS= read -r tag < "$BLSH_RELEASE_MARKER" || true
+  [[ -n $tag ]] || return 1
+  printf '%s' "$tag"
+}
+
+install_blesh_release() {
+  local tag="$1"
+  local programs_dir="$HOME/programs"
+  local archive
+  local staging_dir
+  local extracted_dir
+  local previous_dir
+  local url="https://github.com/${NICE_TO_HAVE_REPO}/releases/download/${tag}/${BLSH_ASSET_NAME}"
+
+  if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
+    log "Installing blesh requires curl, tar, and gzip; skipping"
+    return 1
+  fi
+
+  mkdir -p -- "$programs_dir"
+  archive="$(mktemp "${programs_dir}/.blesh.download.XXXXXX")"
+  staging_dir="$(mktemp -d "${programs_dir}/.blesh.extract.XXXXXX")"
+  extracted_dir="$staging_dir/out"
+  previous_dir="${programs_dir}/.blesh.previous.$$"
+
+  log "Downloading blesh from LinuxStuff release ${tag}"
+  if ! curl -fL --retry 3 --progress-bar -o "$archive" "$url"; then
+    rm -rf -- "$archive" "$staging_dir"
+    log "Failed to download blesh from ${url}"
+    return 1
+  fi
+
+  if ! tar -xzf "$archive" -C "$staging_dir" ||
+     ! [[ -r $extracted_dir/ble.sh && -d $extracted_dir/lib ]]; then
+    rm -rf -- "$archive" "$staging_dir"
+    log "Downloaded blesh archive has an invalid layout; not installing"
+    return 1
+  fi
+  rm -f -- "$archive"
+
+  # Rename within ~/programs so moves are on one filesystem.  Keep the old
+  # installation until the new tree is in place, and restore it on failure.
+  rm -rf -- "$previous_dir"
+  if [[ -e $BLSH_INSTALL_DIR || -L $BLSH_INSTALL_DIR ]]; then
+    mv -- "$BLSH_INSTALL_DIR" "$previous_dir" || {
+      rm -rf -- "$staging_dir"
+      log "Could not prepare the existing blesh installation for replacement"
+      return 1
+    }
+  fi
+
+  if ! mv -- "$extracted_dir" "$BLSH_INSTALL_DIR"; then
+    [[ -e $previous_dir || -L $previous_dir ]] && mv -- "$previous_dir" "$BLSH_INSTALL_DIR" || true
+    rm -rf -- "$staging_dir"
+    log "Could not install blesh; restored the previous installation"
+    return 1
+  fi
+
+  printf '%s\n' "$tag" > "$BLSH_RELEASE_MARKER"
+  rm -rf -- "$previous_dir" "$staging_dir"
+  log "Installed blesh -> ${BLSH_INSTALL_DIR} (release ${tag})"
+}
+
+ensure_blesh() {
+  local latest_tag
+  local installed_tag=''
+
+  if ! latest_tag="$(fetch_current_release_tag)"; then
+    if blesh_is_installed; then
+      log "Could not check for a newer blesh release; keeping ${BLSH_INSTALL_DIR}"
+    else
+      log "Could not query GitHub for the blesh release; skipping installation"
+    fi
+    return 0
+  fi
+
+  installed_tag="$(blesh_installed_release_tag || true)"
+  if blesh_is_installed && [[ $installed_tag == "$latest_tag" ]]; then
+    log "blesh already installed (${BLSH_INSTALL_DIR}, release ${installed_tag})"
+    return 0
+  fi
+
+  if blesh_is_installed; then
+    log "Updating blesh from ${installed_tag:-an untracked installation} to ${latest_tag}"
+    install_blesh_release "$latest_tag" || log "Keeping the existing blesh installation after failed update"
+    return 0
+  fi
+
+  if [[ $INSTALL_NICE_TO_HAVES != 1 ]] && ! confirm_prompt "Download and install blesh?"; then
+    log "Skipping blesh installation. Re-run with --install-optional to install without prompting."
+    return 0
+  fi
+
+  install_blesh_release "$latest_tag" || log "blesh installation failed"
 }
 
 # ---------------------------------------------------------------------------
@@ -705,6 +835,7 @@ install_tool_configs() {
 ensure_dependencies
 
 ensure_nice_to_haves
+ensure_blesh
 
 install_tool_configs
 
@@ -799,6 +930,12 @@ if [ -n "${__TYCHART_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
   return
 fi
 
+# Load blesh before the rest of the interactive configuration, but delay
+# attaching it until the end so it captures the final readline/key bindings.
+if [ -r "$HOME/programs/blesh/ble.sh" ]; then
+  source -- "$HOME/programs/blesh/ble.sh" --attach=none
+fi
+
 __SYSTEM_BASHRC_BLOCK__
 # Many terminals start Bash as a non-login shell, which skips ~/.profile.
 # Source it here so PATH and editor defaults are consistent in every shell.
@@ -845,10 +982,17 @@ elif [ -r /etc/bash_completion.d/git ]; then
   . /etc/bash_completion.d/git
 fi
 
-# fzf integration (Ctrl-T/Ctrl-R/Alt-C keybindings and completion). Guarded so
-# shells stay quiet when fzf is not installed yet (it is a nice-to-have).
+# fzf integration (Ctrl-T/Ctrl-R/Alt-C keybindings and completion). blesh
+# needs its own integration rather than `fzf --bash`; otherwise the two tools
+# compete over Readline bindings. The bundled integration is initialized after
+# bash-completion above, as required by blesh.
 if command -v fzf >/dev/null 2>&1; then
-  eval "$(fzf --bash)"
+  if [ -n "${BLE_VERSION:-}" ]; then
+    ble-import -d integration/fzf-completion
+    ble-import -d integration/fzf-key-bindings
+  else
+    eval "$(fzf --bash)"
+  fi
 fi
 
 # Aliases.
@@ -997,6 +1141,9 @@ bind -x '"\C-h": my_custom_backwards_kill_word'
 
 # Ctrl+W is rebound to match the custom Ctrl+Backspace behavior above.
 bind -x '"\C-w": my_custom_backwards_kill_word'
+
+# Attach only after all startup configuration has finished.
+[[ ! ${BLE_VERSION-} ]] || ble-attach
 EOF
 )
 BASHRC_CONTENT="${BASHRC_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
@@ -1085,6 +1232,39 @@ augroup tychart_vim_startup
     \   execute 'normal! g`"' |
     \ endif
 augroup END
+EOF
+)
+
+BLERC_CONTENT=$(cat <<'EOF'
+# Tokyo Night configuration for blesh.
+#
+# This managed block intentionally leaves PS1 and keymap behavior alone.
+# setupconfig.sh owns the shell prompt; blesh supplies syntax highlighting and
+# completion UI. The Tokyo Night scheme is bundled in blesh's contrib/scheme.
+
+# Use the bundled true-color Tokyo Night palette. blesh defaults to semicolon
+# true-color escape sequences and automatically reduces colors when necessary.
+bleopt color_scheme=tokyonight
+
+# Completion: retain blesh's familiar default interaction while making the
+# polished features explicit and using a human-friendly suggestion delay.
+bleopt complete_auto_complete=1
+bleopt complete_auto_delay=120
+bleopt complete_menu_complete=1
+bleopt complete_menu_filter=1
+bleopt complete_menu_style=align-nowrap
+bleopt complete_menu_color=on
+bleopt complete_menu_color_match=on
+bleopt complete_menu_complete_opts=insert-selection
+
+# Keep completion menus compact enough for normal terminal windows. A negative
+# value is blesh's unlimited default; twelve rows remains readable in tmux,
+# SSH, and local terminals without changing how completion is invoked.
+bleopt complete_menu_maxlines=12
+
+# No prompt, keybinding, cursor, or bell settings are changed here. This keeps
+# shell behavior close to blesh defaults while the colors and completion UI
+# receive the Tokyo Night treatment.
 EOF
 )
 
@@ -1308,6 +1488,7 @@ upsert_managed_block "$BASH_PROFILE_FILE" "bash_profile" "$BASH_PROFILE_CONTENT"
 upsert_managed_block "$BASHRC_FILE" "bashrc" "$BASHRC_CONTENT"
 upsert_managed_block "$VIMRC_FILE" "vimrc" "$VIMRC_CONTENT" '"'
 upsert_managed_block "$INPUTRC_FILE" "inputrc" "$INPUTRC_CONTENT"
+upsert_managed_block "$BLERC_FILE" "blerc" "$BLERC_CONTENT"
 write_managed_file "$OSCYANK_FILE" "$OSCYANK_PLUGIN_CONTENT"
 
 if command -v git >/dev/null 2>&1; then

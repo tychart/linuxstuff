@@ -1,0 +1,29 @@
+# Tokyo Night configuration for blesh.
+#
+# This file intentionally leaves PS1 and keymap behavior alone. setupconfig.sh
+# owns the shell prompt; blesh supplies syntax highlighting and completion UI.
+# The Tokyo Night scheme is bundled in blesh's contrib/scheme directory.
+
+# Use the bundled true-color Tokyo Night palette. blesh defaults to semicolon
+# true-color escape sequences and automatically reduces colors when necessary.
+bleopt color_scheme=tokyonight
+
+# Completion: retain blesh's familiar default interaction while making the
+# polished features explicit and using a human-friendly suggestion delay.
+bleopt complete_auto_complete=1
+bleopt complete_auto_delay=120
+bleopt complete_menu_complete=1
+bleopt complete_menu_filter=1
+bleopt complete_menu_style=align-nowrap
+bleopt complete_menu_color=on
+bleopt complete_menu_color_match=on
+bleopt complete_menu_complete_opts=insert-selection
+
+# Keep completion menus compact enough for normal terminal windows. A negative
+# value is blesh's unlimited default; twelve rows remains readable in tmux,
+# SSH, and local terminals without changing how completion is invoked.
+bleopt complete_menu_maxlines=12
+
+# No prompt, keybinding, cursor, or bell settings are changed here. This keeps
+# shell behavior close to blesh defaults while the colors and completion UI
+# receive the Tokyo Night treatment.
