@@ -11,7 +11,7 @@
 #   - Preserves user content outside those managed blocks
 #   - Avoids backups when only script-owned managed content is being refreshed
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
-#   - Optionally installs fzf, bat, eza, ya, yazi, and zellij into
+#   - Optionally installs fzf, bat, eza, rg, ya, yazi, and zellij into
 #     ~/programs/bin, plus blesh into ~/programs/blesh, from the latest
 #     tychart/linuxstuff release:
 #     missing tools are downloaded via
@@ -91,7 +91,7 @@ Usage:
   ./setupconfig.sh --install-optional
 
   --cleanup-backups    remove backups created by previous runs
-  --install-optional   install missing nice-to-have tools (fzf, bat, eza, ya,
+  --install-optional   install missing nice-to-have tools (fzf, bat, eza, rg, ya,
                        yazi, zellij, blesh) without prompting, even
                        in fully non-interactive runs (cron, CI, ssh -c)
 EOF
@@ -397,7 +397,7 @@ ensure_dependencies() {
 }
 
 # ---------------------------------------------------------------------------
-# Optional ("nice to have") tools: fzf, bat, eza, ya, yazi, zellij
+# Optional ("nice to have") tools: fzf, bat, eza, rg, ya, yazi, zellij
 #
 # These ship as release assets of the tychart/linuxstuff GitHub repo and are
 # installed to ~/programs/bin so custom-patched builds (e.g. the patched
@@ -411,7 +411,7 @@ NICE_TO_HAVE_REPO="tychart/linuxstuff"
 NICE_TO_HAVE_FALLBACK_TAG="v1.0.0"
 NICE_TO_HAVE_BIN_DIR="$HOME/programs/bin"
 # Names here are both the release asset names and the installed binary names.
-NICE_TO_HAVE_TOOLS=(fzf bat eza ya yazi zellij)
+NICE_TO_HAVE_TOOLS=(fzf bat eza rg ya yazi zellij)
 readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR NICE_TO_HAVE_TOOLS
 
 # blesh is a prebuilt, architecture-independent release asset.  Its directory
