@@ -10,8 +10,8 @@
 #   - Updates clearly marked managed blocks inside standard dotfiles
 #   - Preserves user content outside those managed blocks
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
-#   - Optionally installs fzf, bat, eza, rg, ya, yazi, and zellij into
-#     ~/.local/bin from the latest release assets published by this repo:
+#   - Optionally installs fzf, bat, eza, rg, ya, yazi, zellij, and osc52
+#     into ~/.local/bin from the latest release assets published by this repo:
 #     missing tools are downloaded via
 #     curl, the folder is created if needed, and it is added to PATH in
 #     ~/.profile (custom-patched builds like zellij then win over distros)
@@ -87,7 +87,7 @@ Usage:
   ./setupconfig.sh --install-fish
 
   --install-optional   install missing nice-to-have tools (fzf, bat, eza, rg, ya,
-                       yazi, zellij) without prompting, even in fully
+                       yazi, zellij, osc52) without prompting, even in fully
                        non-interactive runs (cron, CI, ssh -c)
   --install-fish       install fish from this repo's release assets into
                        ~/.local/bin without prompting
@@ -338,7 +338,7 @@ ensure_dependencies() {
 }
 
 # ---------------------------------------------------------------------------
-# Optional ("nice to have") tools: fzf, bat, eza, rg, ya, yazi, zellij
+# Optional ("nice to have") tools: fzf, bat, eza, rg, ya, yazi, zellij, osc52
 #
 # These ship as release assets of this GitHub repo and are
 # installed to ~/.local/bin, the conventional user-local executable location
@@ -352,17 +352,28 @@ NICE_TO_HAVE_REPO="tychart/linuxstuff"
 NICE_TO_HAVE_FALLBACK_TAG="v1.0.0"
 NICE_TO_HAVE_BIN_DIR="$HOME/.local/bin"
 # Names here are both the release asset names and the installed binary names.
-NICE_TO_HAVE_TOOLS=(fzf bat eza rg ya yazi zellij)
+NICE_TO_HAVE_TOOLS=(fzf bat eza rg ya yazi zellij osc52)
 FISH_TOOLS=(fish)
 readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR NICE_TO_HAVE_TOOLS FISH_TOOLS
 
-# Cheap ELF check that needs no extra tools: real binaries start with the 4
-# magic bytes 0x7f 'E' 'L' 'F'. Catches HTML error pages and truncated or
-# corrupt downloads without requiring the `file` command.
+# Cheap release-asset checks that need no extra tools: compiled binaries start
+# with the 4 magic bytes 0x7f 'E' 'L' 'F', while shell-script executables like
+# osc52 start with a shebang. Catches HTML error pages and truncated or corrupt
+# downloads without requiring the `file` command.
 is_elf_binary() {
   local magic
   magic="$(head -c 4 -- "$1" 2>/dev/null)"
   [[ "$magic" == $'\x7fELF' ]]
+}
+
+is_shebang_script() {
+  local magic
+  magic="$(head -c 2 -- "$1" 2>/dev/null)"
+  [[ "$magic" == '#!' ]]
+}
+
+is_valid_release_executable() {
+  is_elf_binary "$1" || is_shebang_script "$1"
 }
 
 # Resolve the newest release tag via the GitHub API.  Callers that only need
@@ -418,12 +429,12 @@ ensure_repo_binaries() {
 
   for tool in "${tools_ref[@]}"; do
     dest="$dir/$tool"
-    if [[ -s $dest ]] && is_elf_binary "$dest"; then
+    if [[ -s $dest ]] && is_valid_release_executable "$dest"; then
       chmod +x -- "$dest" 2>/dev/null || true
       log "${label} '$tool' already installed ($dest)"
     else
       if [[ -e $dest ]]; then
-        log "${label} '$tool' exists at $dest but is empty or not a valid ELF binary; re-downloading"
+        log "${label} '$tool' exists at $dest but is empty or not a valid release executable; re-downloading"
       fi
       missing+=("$tool")
     fi
@@ -462,9 +473,9 @@ ensure_repo_binaries() {
       continue
     fi
 
-    if ! is_elf_binary "$tmp"; then
+    if ! is_valid_release_executable "$tmp"; then
       rm -f -- "$tmp"
-      log "Downloaded ${tool} is not a valid ELF binary (from ${url}); not installing"
+      log "Downloaded ${tool} is not a valid release executable (from ${url}); not installing"
       continue
     fi
 
@@ -980,18 +991,20 @@ y() {
 }
 
 
-osc52() {
-    local data
+if ! command -v osc52 >/dev/null 2>&1; then
+  osc52() {
+      local data
 
-    if [ $# -gt 0 ]; then
-        data="$*"
-    else
-        data="$(cat)"
-    fi
+      if [ $# -gt 0 ]; then
+          data="$*"
+      else
+          data="$(cat)"
+      fi
 
-    printf '\033]52;c;%s\a' \
-        "$(printf '%s' "$data" | base64 -w0)"
-}
+      printf '\033]52;c;%s\a' \
+          "$(printf '%s' "$data" | base64 -w0)"
+  }
+fi
 
 # Prompt.
 # NOTE: You mentioned you may replace this later with Starship.
