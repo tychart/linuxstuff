@@ -9,7 +9,6 @@
 # Behavior:
 #   - Updates clearly marked managed blocks inside standard dotfiles
 #   - Preserves user content outside those managed blocks
-#   - Avoids backups when only script-owned managed content is being refreshed
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
 #   - Optionally installs fzf, bat, eza, rg, ya, yazi, and zellij into
 #     ~/.local/bin from the latest release assets published by this repo:
@@ -35,22 +34,18 @@
 # Usage:
 #   chmod +x setupconfig.sh
 #   ./setupconfig.sh
-#   ./setupconfig.sh --cleanup-backups
 #   ./setupconfig.sh --install-optional
-#   ./setupconfig.sh --cleanup-backups --install-optional
+#   ./setupconfig.sh --install-fish
 #
 #   or
 #   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --cleanup-backups
 #   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --install-optional
+#   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --install-fish
 
 set -euo pipefail
 
 SCRIPT_TAG="setupconfig"
 readonly SCRIPT_TAG
-TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-readonly TIMESTAMP
-
 # Single source of truth for the preferred editor written into ~/.profile.
 DEFAULT_EDITOR="vim"
 readonly DEFAULT_EDITOR
@@ -88,11 +83,9 @@ show_usage() {
   cat <<EOF
 Usage:
   ./setupconfig.sh
-  ./setupconfig.sh --cleanup-backups
   ./setupconfig.sh --install-optional
   ./setupconfig.sh --install-fish
 
-  --cleanup-backups    remove backups created by previous runs
   --install-optional   install missing nice-to-have tools (fzf, bat, eza, rg, ya,
                        yazi, zellij) without prompting, even in fully
                        non-interactive runs (cron, CI, ssh -c)
@@ -101,47 +94,9 @@ Usage:
 EOF
 }
 
-cleanup_backups() {
-  local count=0
-  local file
-
-  shopt -s nullglob
-
-  for file in \
-    "$HOME"/setupconfig_backup_.profile.* \
-    "$HOME"/setupconfig_backup_.bash_profile.* \
-    "$HOME"/setupconfig_backup_.bashrc.* \
-    "$HOME"/setupconfig_backup_.vimrc.* \
-    "$HOME"/setupconfig_backup_.inputrc.* \
-    "$VIM_PLUGIN_DIR"/setupconfig_backup_oscyank.vim.* \
-    "$HOME"/.profile.bak."$SCRIPT_TAG".* \
-    "$HOME"/.bash_profile.bak."$SCRIPT_TAG".* \
-    "$HOME"/.bashrc.bak."$SCRIPT_TAG".* \
-    "$HOME"/.vimrc.bak."$SCRIPT_TAG".* \
-    "$HOME"/.inputrc.bak."$SCRIPT_TAG".* \
-    "$OSCYANK_FILE".bak."$SCRIPT_TAG".*
-  do
-    rm -f -- "$file"
-    log "Removed backup $file"
-    count=$((count + 1))
-  done
-
-  shopt -u nullglob
-
-  if [[ $count -eq 0 ]]; then
-    log "No setupconfig backup files found."
-  else
-    log "Removed $count backup file(s)."
-  fi
-}
-
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --cleanup-backups)
-        cleanup_backups
-        exit 0
-        ;;
       --install-optional)
         INSTALL_NICE_TO_HAVES=1
         shift
@@ -164,23 +119,6 @@ parse_args() {
 }
 
 parse_args "$@"
-
-backup_file() {
-  local file="$1"
-  local backup
-  local dir
-  local base
-
-  [[ -e $file ]] || return 0
-
-  dir="$(dirname "$file")"
-  base="$(basename "$file")"
-  backup="${dir}/setupconfig_backup_${base}.${TIMESTAMP}"
-  if [[ ! -e $backup ]]; then
-    cp -a -- "$file" "$backup"
-    log "Backed up $file -> $backup"
-  fi
-}
 
 # Replace one managed block inside a file while leaving everything else alone.
 upsert_managed_block() {
@@ -574,8 +512,8 @@ ensure_fish() {
 # are verified, and are moved into place only after any previous file is
 # rotated to <name>.bak, then <name>.bak2, etc. Nothing happens when the
 # content is unchanged, so reruns are quiet and idempotent. The .bak files
-# are intentionally left alone by --cleanup-backups: they may pre-date this
-# script or be the user's own files.
+# are intentionally left in place so the previous whole-file config can be
+# restored manually if needed.
 # ---------------------------------------------------------------------------
 
 # Raw-file base for configs on the default branch. Uses the canonical
