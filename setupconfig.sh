@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-# tychart setup bootstrap
+# Portable setup bootstrap
 #
 # Purpose:
-#   Apply a portable personal shell/Vim setup across Fedora, Ubuntu, and RHEL
+#   Apply a portable shell/Vim/Fish setup across Fedora, Ubuntu, and RHEL
 #   without destructively replacing whole dotfiles.
 #
 # Behavior:
@@ -12,12 +12,13 @@
 #   - Avoids backups when only script-owned managed content is being refreshed
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
 #   - Optionally installs fzf, bat, eza, rg, ya, yazi, and zellij into
-#     ~/.local/bin from the latest tychart/linuxstuff release:
+#     ~/.local/bin from the latest release assets published by this repo:
 #     missing tools are downloaded via
 #     curl, the folder is created if needed, and it is added to PATH in
 #     ~/.profile (custom-patched builds like zellij then win over distros)
 #   - Adds shell integration for them to the managed ~/.bashrc block: the y()
-#     yazi wrapper, the zellij `z` alias, and fzf keybindings/completion
+#     yazi wrapper, the zellij `z` alias, fzf keybindings/completion, and
+#     optional handoff into Fish for interactive shells when Fish is installed
 #   - Keeps the yazi (yazi.toml, theme.toml) and zellij (config.kdl) configs
 #     under ${XDG_CONFIG_HOME:-~/.config} in sync with the repo whenever the
 #     matching tool is installed (no prompt): a changed file rotates the
@@ -45,7 +46,7 @@
 
 set -euo pipefail
 
-SCRIPT_TAG="tychart-setup"
+SCRIPT_TAG="setupconfig"
 readonly SCRIPT_TAG
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 readonly TIMESTAMP
@@ -59,16 +60,18 @@ BASH_PROFILE_FILE="$HOME/.bash_profile"
 BASHRC_FILE="$HOME/.bashrc"
 VIMRC_FILE="$HOME/.vimrc"
 INPUTRC_FILE="$HOME/.inputrc"
+FISH_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
 VIM_DIR="$HOME/.vim"
 VIM_PLUGIN_DIR="$VIM_DIR/plugin"
 VIM_UNDO_DIR="$VIM_DIR/undodir"
 OSCYANK_FILE="$VIM_PLUGIN_DIR/oscyank.vim"
-readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE VIMRC_FILE INPUTRC_FILE
+readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE VIMRC_FILE INPUTRC_FILE FISH_CONFIG_FILE
 readonly VIM_DIR VIM_PLUGIN_DIR VIM_UNDO_DIR OSCYANK_FILE
 
-# When set (--install-optional), missing nice-to-have tools are installed
-# without prompting, even when the script runs without a TTY (e.g. piped).
+# When set (--install-optional / --install-fish), missing optional tools are
+# installed without prompting, even when the script runs without a TTY.
 INSTALL_NICE_TO_HAVES=0
+INSTALL_FISH=0
 
 # Remove temporary files on exit, including when set -e aborts mid-run.
 TEMP_FILES=()
@@ -87,11 +90,14 @@ Usage:
   ./setupconfig.sh
   ./setupconfig.sh --cleanup-backups
   ./setupconfig.sh --install-optional
+  ./setupconfig.sh --install-fish
 
   --cleanup-backups    remove backups created by previous runs
   --install-optional   install missing nice-to-have tools (fzf, bat, eza, rg, ya,
                        yazi, zellij) without prompting, even in fully
                        non-interactive runs (cron, CI, ssh -c)
+  --install-fish       install fish from this repo's release assets into
+                       ~/.local/bin without prompting
 EOF
 }
 
@@ -140,6 +146,10 @@ parse_args() {
         INSTALL_NICE_TO_HAVES=1
         shift
         ;;
+      --install-fish)
+        INSTALL_FISH=1
+        shift
+        ;;
       -h|--help)
         show_usage
         exit 0
@@ -180,7 +190,7 @@ upsert_managed_block() {
   local marker_prefix="${4:-#}"
   local start_marker="${marker_prefix} >>> ${SCRIPT_TAG}:${name} >>>"
   local end_marker="${marker_prefix} <<< ${SCRIPT_TAG}:${name} <<<"
-  # Also recognize older marker styles so reruns can cleanly replace them.
+  # Also recognize the alternate comment prefix used by other managed files.
   local legacy_hash_start="# >>> ${SCRIPT_TAG}:${name} >>>"
   local legacy_hash_end="# <<< ${SCRIPT_TAG}:${name} <<<"
   local legacy_vim_start="\" >>> ${SCRIPT_TAG}:${name} >>>"
@@ -392,7 +402,7 @@ ensure_dependencies() {
 # ---------------------------------------------------------------------------
 # Optional ("nice to have") tools: fzf, bat, eza, rg, ya, yazi, zellij
 #
-# These ship as release assets of the tychart/linuxstuff GitHub repo and are
+# These ship as release assets of this GitHub repo and are
 # installed to ~/.local/bin, the conventional user-local executable location
 # on modern Linux systems. Only tools missing from that folder are downloaded;
 # the folder is created up front and is kept on PATH via the managed
@@ -405,7 +415,8 @@ NICE_TO_HAVE_FALLBACK_TAG="v1.0.0"
 NICE_TO_HAVE_BIN_DIR="$HOME/.local/bin"
 # Names here are both the release asset names and the installed binary names.
 NICE_TO_HAVE_TOOLS=(fzf bat eza rg ya yazi zellij)
-readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR NICE_TO_HAVE_TOOLS
+FISH_TOOLS=(fish)
+readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR NICE_TO_HAVE_TOOLS FISH_TOOLS
 
 # Cheap ELF check that needs no extra tools: real binaries start with the 4
 # magic bytes 0x7f 'E' 'L' 'F'. Catches HTML error pages and truncated or
@@ -441,60 +452,65 @@ fetch_latest_release_tag() {
   printf '%s' "$NICE_TO_HAVE_FALLBACK_TAG"
 }
 
-ensure_nice_to_haves() {
+ensure_repo_binaries() {
+  local prompt="$1"
+  local auto_install="$2"
+  local auto_flag_name="$3"
+  local label="$4"
+  local tools_name="$5"
   local dir="$NICE_TO_HAVE_BIN_DIR"
+  local -n tools_ref="$tools_name"
   local missing=()
+  local present=()
   local tool
   local tag
   local url
   local dest
   local tmp
   local version
-  local present=()
 
   if [[ ! -d $dir ]]; then
     mkdir -p "$dir"
-    log "Created $dir (nice-to-have binaries will be installed here)"
+    log "Created $dir (optional binaries will be installed here)"
   fi
 
-  # Remove stale partial downloads from any previously interrupted run.
   shopt -s nullglob
   rm -f -- "$dir"/.*.part.*
   shopt -u nullglob
 
-  for tool in "${NICE_TO_HAVE_TOOLS[@]}"; do
+  for tool in "${tools_ref[@]}"; do
     dest="$dir/$tool"
     if [[ -s $dest ]] && is_elf_binary "$dest"; then
       chmod +x -- "$dest" 2>/dev/null || true
-      log "Nice-to-have '$tool' already installed ($dest)"
+      log "${label} '$tool' already installed ($dest)"
     else
       if [[ -e $dest ]]; then
-        log "Nice-to-have '$tool' exists at $dest but is empty or not a valid ELF binary; re-downloading"
+        log "${label} '$tool' exists at $dest but is empty or not a valid ELF binary; re-downloading"
       fi
       missing+=("$tool")
     fi
   done
 
   if [[ ${#missing[@]} -eq 0 ]]; then
-    log "All nice-to-have tools present in $dir"
+    log "All ${label,,} present in $dir"
     return 0
   fi
 
   if ! command -v curl >/dev/null 2>&1; then
-    log "curl is required to install missing nice-to-have tools (${missing[*]}); skipping"
+    log "curl is required to install missing ${label,,} (${missing[*]}); skipping"
     return 0
   fi
 
-  log "Nice-to-have tools missing from $dir: ${missing[*]}"
+  log "Missing ${label,,} from $dir: ${missing[*]}"
 
-  if [[ $INSTALL_NICE_TO_HAVES != 1 ]] && ! confirm_prompt "Download and install the missing nice-to-have tools?"; then
-    log "Skipping nice-to-have tool installation."
-    log "Re-run with --install-optional to install without prompting (also works in cron/CI)."
+  if [[ $auto_install != 1 ]] && ! confirm_prompt "$prompt"; then
+    log "Skipping ${label,,} installation."
+    log "Re-run with ${auto_flag_name} to install without prompting (also works in cron/CI)."
     return 0
   fi
 
   tag="$(fetch_latest_release_tag)"
-  log "Installing from release ${tag}"
+  log "Installing ${label,,} from release ${tag}"
 
   for tool in "${missing[@]}"; do
     dest="$dir/$tool"
@@ -525,10 +541,28 @@ ensure_nice_to_haves() {
     fi
   done
 
-  for tool in "${NICE_TO_HAVE_TOOLS[@]}"; do
+  for tool in "${tools_ref[@]}"; do
     [[ -x $dir/$tool ]] && present+=("$tool")
   done
-  log "Nice-to-have tools present in ${dir}: ${present[*]:-none}"
+  log "${label} present in ${dir}: ${present[*]:-none}"
+}
+
+ensure_nice_to_haves() {
+  ensure_repo_binaries \
+    "Download and install the missing nice-to-have tools?" \
+    "$INSTALL_NICE_TO_HAVES" \
+    "--install-optional" \
+    "Nice-to-have tools" \
+    NICE_TO_HAVE_TOOLS
+}
+
+ensure_fish() {
+  ensure_repo_binaries \
+    "Download and install fish?" \
+    "$INSTALL_FISH" \
+    "--install-fish" \
+    "Fish" \
+    FISH_TOOLS
 }
 
 # ---------------------------------------------------------------------------
@@ -536,7 +570,7 @@ ensure_nice_to_haves() {
 #
 # When a tool is installed (by this script into $NICE_TO_HAVE_BIN_DIR, or
 # already on PATH), keep its config under ${XDG_CONFIG_HOME:-~/.config} in
-# sync with the tychart/linuxstuff repo. Downloads go to a temp file first,
+# sync with the source repo. Downloads go to a temp file first,
 # are verified, and are moved into place only after any previous file is
 # rotated to <name>.bak, then <name>.bak2, etc. Nothing happens when the
 # content is unchanged, so reruns are quiet and idempotent. The .bak files
@@ -710,6 +744,7 @@ install_tool_configs() {
 ensure_dependencies
 
 ensure_nice_to_haves
+ensure_fish
 
 install_tool_configs
 
@@ -731,7 +766,7 @@ fi
 PROFILE_CONTENT=$(cat <<'EOF'
 # Login shells read ~/.profile first, then pull in ~/.bashrc for interactive extras.
 # The guard avoids an infinite loop when ~/.bashrc later sources ~/.profile.
-if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ] && [ -z "${__TYCHART_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
+if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ] && [ -z "${__SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
   case $- in
     *i*) . "$HOME/.bashrc" ;;
   esac
@@ -751,7 +786,7 @@ done
 
 # Collapse duplicate entries left over from older profiles while keeping the
 # first occurrence, so the precedence above is preserved.
-__tychart_dedupe_path() {
+__setupconfig_dedupe_path() {
   local result='' entry
   local IFS=':'
   for entry in $PATH; do
@@ -763,8 +798,8 @@ __tychart_dedupe_path() {
   done
   printf '%s' "$result"
 }
-PATH="$(__tychart_dedupe_path)"
-unset -f __tychart_dedupe_path
+PATH="$(__setupconfig_dedupe_path)"
+unset -f __setupconfig_dedupe_path
 export PATH
 
 # Editor defaults live here so other tools can simply inherit them.
@@ -799,7 +834,7 @@ esac
 # preserved user content. If we are already inside such a source, stop:
 # everything below was already defined by the outer pass. Without this the
 # two files would source each other forever and every shell would hang.
-if [ -n "${__TYCHART_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
+if [ -n "${__SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
   return
 fi
 
@@ -808,9 +843,14 @@ __SYSTEM_BASHRC_BLOCK__
 # Source it here so PATH and editor defaults are consistent in every shell.
 # The guard prevents recursion because ~/.profile sources this file back.
 if [ -r "$HOME/.profile" ]; then
-  __TYCHART_SOURCING_PROFILE_FROM_BASHRC=1
+  __SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC=1
   . "$HOME/.profile"
-  unset __TYCHART_SOURCING_PROFILE_FROM_BASHRC
+  unset __SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC
+fi
+
+# Prefer Fish for interactive work when it is installed.
+if [ -z "${FISH_VERSION:-}" ] && command -v fish >/dev/null 2>&1; then
+  exec "$(command -v fish)"
 fi
 
 export INPUTRC="${INPUTRC:-$HOME/.inputrc}"
@@ -823,16 +863,16 @@ HISTTIMEFORMAT="%d/%m/%y %T "
 shopt -s histappend
 shopt -s checkwinsize
 
-__tychart_history_sync() {
+__setupconfig_history_sync() {
   # Append this shell's new history lines, then pull in lines from other shells.
   history -a
   history -n
 }
 
 case ";${PROMPT_COMMAND:-};" in
-  *";__tychart_history_sync;"*) ;;
-  '') PROMPT_COMMAND="__tychart_history_sync" ;;
-  *)  PROMPT_COMMAND="__tychart_history_sync;${PROMPT_COMMAND}" ;;
+  *";__setupconfig_history_sync;"*) ;;
+  '') PROMPT_COMMAND="__setupconfig_history_sync" ;;
+  *)  PROMPT_COMMAND="__setupconfig_history_sync;${PROMPT_COMMAND}" ;;
 esac
 export PROMPT_COMMAND
 
@@ -971,7 +1011,7 @@ osc52() {
 # Prompt.
 # NOTE: You mentioned you may replace this later with Starship.
 # This section is intentionally isolated so it is easy to remove/swap.
-__tychart_set_prompt() {
+__setupconfig_set_prompt() {
   if [ "$TERM" = "xterm-color" ]; then
     PS1='\u@\h \w $ '
     return
@@ -983,7 +1023,7 @@ __tychart_set_prompt() {
     PS1='\[\e[1;35m\]\u\[\e[0m\]@\[\e[0;31m\]\h\[\e[1;36m\]($(get_os_short)) \[\e[1;34m\]\w\[\e[0m\] # '
   fi
 }
-__tychart_set_prompt
+__setupconfig_set_prompt
 export PS1
 
 # Readline quality-of-life.
@@ -1099,7 +1139,7 @@ nmap <leader>cc <leader>c_
 vmap <leader>c <Plug>OSCYankVisual
 
 " Reopen files at the last cursor position from the previous edit session.
-augroup tychart_vim_startup
+augroup setupconfig_vim_startup
   autocmd!
   autocmd BufReadPost *
     \ if line("'\"") > 0 && line("'\"") <= line('$') && &filetype !~# 'commit' |
@@ -1108,6 +1148,256 @@ augroup tychart_vim_startup
 augroup END
 EOF
 )
+
+FISH_CONFIG_CONTENT=$(cat <<'EOF'
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+
+# Preserve inherited values when they already exist.
+if not set -q EDITOR
+    set -gx EDITOR __DEFAULT_EDITOR__
+end
+
+if not set -q VISUAL
+    set -gx VISUAL $EDITOR
+end
+
+if not set -q SYSTEMD_EDITOR
+    set -gx SYSTEMD_EDITOR $EDITOR
+end
+
+# Prefer user-local executable directories. Use fish_add_path when available,
+# but keep a portable fallback for older Fish builds.
+if functions -q fish_add_path
+    fish_add_path --path --move "$HOME/bin"
+    fish_add_path --path --move "$HOME/.local/bin"
+else
+    for dir in "$HOME/bin" "$HOME/.local/bin"
+        if test -d "$dir"
+            if not contains -- "$dir" $PATH
+                set -gx PATH "$dir" $PATH
+            end
+        end
+    end
+end
+
+set -gx BUN_INSTALL "$HOME/.bun"
+if test -d "$BUN_INSTALL/bin"
+    if functions -q fish_add_path
+        fish_add_path --path --move "$BUN_INSTALL/bin"
+    else if not contains -- "$BUN_INSTALL/bin" $PATH
+        set -gx PATH "$BUN_INSTALL/bin" $PATH
+    end
+end
+
+# Everything below is only needed in an interactive shell.
+status is-interactive; or return
+
+# Natively bridge scripts that hardcode 'node' to use 'bun' instead.
+if command -q bun; and not command -q node
+    mkdir -p "$HOME/.local/bin"
+    if not test -e "$HOME/.local/bin/node"
+        ln -s (command -s bun) "$HOME/.local/bin/node" 2>/dev/null
+    end
+end
+
+# ---------------------------------------------------------------------------
+# fzf
+# ---------------------------------------------------------------------------
+
+if command -q fzf
+    fzf --fish | source
+end
+
+# ---------------------------------------------------------------------------
+# Tool integrations / aliases
+# ---------------------------------------------------------------------------
+
+if command -q eza
+    abbr --add ll 'eza -lag --git --icons --group-directories-first'
+else
+    abbr --add ll 'ls -lah --color=auto --group-directories-first'
+end
+
+if command -q bat
+    abbr --add b 'bat'
+    if command -q man
+        set -gx MANPAGER 'bat -plman'
+    end
+end
+
+# ---------------------------------------------------------------------------
+# Aliases
+# ---------------------------------------------------------------------------
+
+abbr --add .. 'cd ..'
+abbr --add ... 'cd ../..'
+abbr --add .... 'cd ../../..'
+abbr --add ..... 'cd ../../../..'
+
+abbr --add c clear
+abbr --add k kubectl
+abbr --add ver 'cat /etc/*-release'
+abbr --add whoson 'last -w | tac'
+abbr --add details get_machine_info
+abbr --add z 'zellij attach -c main'
+
+# Reload Fish configuration.
+abbr --add src 'source "$__fish_config_dir/config.fish"'
+
+# Python venvs provide a Fish-specific activation script.
+abbr --add venv 'source .venv/bin/activate.fish'
+
+# ---------------------------------------------------------------------------
+# Small helper functions
+# ---------------------------------------------------------------------------
+
+function myip --description 'Print primary IP address'
+    hostname -I 2>/dev/null | awk '{print $1}'
+end
+
+function mmkdir --description 'Create a directory and enter it'
+    if test (count $argv) -ne 1
+        printf 'usage: mmkdir <dir>\n' >&2
+        return 1
+    end
+
+    command mkdir -p -- "$argv[1]"
+    and builtin cd -- "$argv[1]"
+end
+
+function get_machine_info --description 'Print host, IP, and OS summary'
+    set -l distro unknown
+    set -l version_id unknown
+    set -l os
+    set -l ver
+    set -l name (hostname)
+    set -l ip
+
+    if test -r /etc/os-release
+        set -l id_line (string match -r '^ID=.*' </etc/os-release)
+        set -l version_line (string match -r '^VERSION_ID=.*' </etc/os-release)
+
+        if test -n "$id_line"
+            set distro (string replace 'ID=' '' "$id_line" | string trim -c '"')
+        end
+
+        if test -n "$version_line"
+            set version_id (string replace 'VERSION_ID=' '' "$version_line" | string trim -c '"')
+        end
+    end
+
+    if test "$distro" = ubuntu
+        set os ubu
+    else
+        set os "$distro"
+    end
+
+    set ver "$os$version_id"
+    set ip (hostname -I 2>/dev/null | awk '{print $1}')
+    if test -z "$ip"
+        set ip (hostname -i 2>/dev/null)
+    end
+
+    printf '******************************\n'
+    printf 'Hostname: %s\n' "$name"
+    printf 'IP address: %s\n' "$ip"
+    printf 'Operating system: %s\n' "$ver"
+    printf '******************************\n'
+end
+
+function get_os_short --description 'Print short OS identifier'
+    set -l os_id unknown
+    set -l os_version
+
+    if test -r /etc/os-release
+        set -l id_line (string match -r '^ID=.*' </etc/os-release)
+        set -l version_line (string match -r '^VERSION_ID=.*' </etc/os-release)
+
+        if test -n "$id_line"
+            set os_id (string replace 'ID=' '' "$id_line" | string trim -c '"')
+        end
+
+        if test -n "$version_line"
+            set os_version (string replace 'VERSION_ID=' '' "$version_line" | string trim -c '"')
+        end
+    end
+
+    if test "$os_id" = ubuntu
+        set os_id ubu
+    end
+
+    printf '%s%s' "$os_id" "$os_version"
+end
+
+function ssu --description 'Open root Fish shell using current user config and history'
+    set -l fish_path (command -s fish)
+
+    if test -z "$fish_path"
+        printf 'ssu: fish not found in PATH\n' >&2
+        return 127
+    end
+
+    set -l root_env "HOME=$HOME"
+    set -q XDG_CONFIG_HOME; and set -a root_env "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
+    set -q XDG_DATA_HOME; and set -a root_env "XDG_DATA_HOME=$XDG_DATA_HOME"
+
+    command sudo env $root_env "$fish_path" -i
+end
+
+function y --description 'Open yazi and cd to the directory it leaves behind'
+    set -l tmp (mktemp -t "yazi-cwd.XXXXXX")
+    command yazi $argv --cwd-file="$tmp"
+    if read -z cwd <"$tmp"; and test "$cwd" != "$PWD"; and test -d "$cwd"
+        builtin cd -- "$cwd"
+    end
+    command rm -f -- "$tmp"
+end
+
+# ---------------------------------------------------------------------------
+# Key bindings
+# ---------------------------------------------------------------------------
+
+function fish_user_key_bindings
+    bind \cw backward-kill-word
+    bind \ch backward-kill-word
+end
+
+# ---------------------------------------------------------------------------
+# Prompt
+# ---------------------------------------------------------------------------
+
+function fish_prompt
+    set -l user_color green
+    set -l prompt_symbol '>'
+
+    if fish_is_root_user
+        set user_color magenta
+        set prompt_symbol '#'
+    end
+
+    set_color --bold $user_color
+    printf '%s' "$USER"
+
+    set_color normal
+    printf '@'
+
+    set_color red
+    printf '%s' (prompt_hostname)
+
+    set_color --bold cyan
+    printf '(%s) ' (get_os_short)
+
+    set_color --bold blue
+    printf '%s' (prompt_pwd)
+
+    set_color normal
+    printf ' %s ' "$prompt_symbol"
+end
+EOF
+)
+FISH_CONFIG_CONTENT="${FISH_CONFIG_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 
 INPUTRC_CONTENT=$(cat <<'EOF'
 set input-meta on
@@ -1327,6 +1617,7 @@ mkdir -p "$VIM_PLUGIN_DIR" "$VIM_UNDO_DIR"
 upsert_managed_block "$PROFILE_FILE" "profile" "$PROFILE_CONTENT"
 upsert_managed_block "$BASH_PROFILE_FILE" "bash_profile" "$BASH_PROFILE_CONTENT"
 upsert_managed_block "$BASHRC_FILE" "bashrc" "$BASHRC_CONTENT"
+upsert_managed_block "$FISH_CONFIG_FILE" "fish" "$FISH_CONFIG_CONTENT"
 upsert_managed_block "$VIMRC_FILE" "vimrc" "$VIMRC_CONTENT" '"'
 upsert_managed_block "$INPUTRC_FILE" "inputrc" "$INPUTRC_CONTENT"
 write_managed_file "$OSCYANK_FILE" "$OSCYANK_PLUGIN_CONTENT"
