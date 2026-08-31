@@ -679,10 +679,45 @@ install_tool_configs() {
   ensure_tokyo_night_flavor "$config_root"
 }
 
+ensure_bun_node_shim() {
+  local bun_bin="$HOME/.bun/bin/bun"
+  local node_shim="$HOME/.local/bin/node"
+
+  if [[ ! -x $bun_bin ]]; then
+    log "Bun not installed under ~/.bun; skipping node compatibility shim"
+    return 0
+  fi
+
+  if command -v node >/dev/null 2>&1; then
+    log "node already available on PATH; skipping Bun compatibility shim"
+    return 0
+  fi
+
+  mkdir -p -- "$HOME/.local/bin"
+
+  if [[ -L $node_shim ]]; then
+    if [[ $(readlink -- "$node_shim") == "$bun_bin" ]]; then
+      log "Bun node compatibility shim already present (${node_shim})"
+      return 0
+    fi
+    log "Existing ${node_shim} points elsewhere; leaving it unchanged"
+    return 0
+  fi
+
+  if [[ -e $node_shim ]]; then
+    log "Existing ${node_shim} is not a symlink; leaving it unchanged"
+    return 0
+  fi
+
+  ln -s -- "$bun_bin" "$node_shim"
+  log "Installed Bun node compatibility shim -> ${node_shim}"
+}
+
 ensure_dependencies
 
 ensure_nice_to_haves
 ensure_fish
+ensure_bun_node_shim
 
 install_tool_configs
 
@@ -721,6 +756,18 @@ for dir in "$HOME/bin" "$HOME/.local/bin"; do
     esac
   fi
 done
+
+# Bun: configure it only when installed so shells that do not use Bun pay
+# almost no startup cost.
+if [ -d "$HOME/.bun" ]; then
+  export BUN_INSTALL="$HOME/.bun"
+  if [ -d "$BUN_INSTALL/bin" ]; then
+    case ":$PATH:" in
+      *":$BUN_INSTALL/bin:"*) ;;
+      *) PATH="$BUN_INSTALL/bin:$PATH" ;;
+    esac
+  fi
+fi
 
 # Collapse duplicate entries left over from older profiles while keeping the
 # first occurrence, so the precedence above is preserved.
@@ -1130,15 +1177,6 @@ if test -d "$HOME/.bun"
             fish_add_path --path --move "$BUN_INSTALL/bin"
         else if not contains -- "$BUN_INSTALL/bin" $PATH
             set -gx PATH "$BUN_INSTALL/bin" $PATH
-        end
-    end
-
-    # Add a user-space compatibility shim for programs that hardcode `node`
-    # when Bun is available but Node.js is not.
-    if command -q bun; and not command -q node
-        mkdir -p "$HOME/.local/bin"
-        if not test -e "$HOME/.local/bin/node"
-            ln -s "$BUN_INSTALL/bin/bun" "$HOME/.local/bin/node" 2>/dev/null
         end
     end
 end
