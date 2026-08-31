@@ -1120,25 +1120,31 @@ else
     end
 end
 
-set -gx BUN_INSTALL "$HOME/.bun"
-if test -d "$BUN_INSTALL/bin"
-    if functions -q fish_add_path
-        fish_add_path --path --move "$BUN_INSTALL/bin"
-    else if not contains -- "$BUN_INSTALL/bin" $PATH
-        set -gx PATH "$BUN_INSTALL/bin" $PATH
+# Bun: only configure it when installed, so shells that do not use Bun pay
+# almost no startup cost.
+if test -d "$HOME/.bun"
+    set -gx BUN_INSTALL "$HOME/.bun"
+
+    if test -d "$BUN_INSTALL/bin"
+        if functions -q fish_add_path
+            fish_add_path --path --move "$BUN_INSTALL/bin"
+        else if not contains -- "$BUN_INSTALL/bin" $PATH
+            set -gx PATH "$BUN_INSTALL/bin" $PATH
+        end
+    end
+
+    # Add a user-space compatibility shim for programs that hardcode `node`
+    # when Bun is available but Node.js is not.
+    if command -q bun; and not command -q node
+        mkdir -p "$HOME/.local/bin"
+        if not test -e "$HOME/.local/bin/node"
+            ln -s "$BUN_INSTALL/bin/bun" "$HOME/.local/bin/node" 2>/dev/null
+        end
     end
 end
 
 # Everything below is only needed in an interactive shell.
 status is-interactive; or return
-
-# Natively bridge scripts that hardcode 'node' to use 'bun' instead.
-if command -q bun; and not command -q node
-    mkdir -p "$HOME/.local/bin"
-    if not test -e "$HOME/.local/bin/node"
-        ln -s (command -s bun) "$HOME/.local/bin/node" 2>/dev/null
-    end
-end
 
 # ---------------------------------------------------------------------------
 # fzf
