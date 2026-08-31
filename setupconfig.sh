@@ -327,7 +327,6 @@ package_name_for() {
 
   case "$pm:$dep" in
     *:git)             printf 'git' ;;
-    *:bash-completion) printf 'bash-completion' ;;
     apt:vim)           printf 'vim' ;;
     dnf:vim|yum:vim)   printf 'vim-enhanced' ;;
     *) return 1 ;;
@@ -356,10 +355,6 @@ ensure_dependencies() {
 
   command -v git >/dev/null 2>&1 || missing+=(git)
   command -v vim >/dev/null 2>&1 || missing+=(vim)
-
-  if ! { [[ -r /usr/share/bash-completion/bash_completion ]] || [[ -r /etc/bash_completion ]]; }; then
-    missing+=(bash-completion)
-  fi
 
   if [[ ${#missing[@]} -eq 0 ]]; then
     return 0
