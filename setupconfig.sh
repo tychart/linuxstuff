@@ -10,11 +10,14 @@
 #   - Updates clearly marked managed blocks inside standard dotfiles
 #   - Preserves user content outside those managed blocks
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
-#   - Optionally installs fzf, bat, eza, rg, ya, yazi, zellij, and osc52
-#     into ~/.local/bin from the latest release assets published by this repo:
-#     missing tools are downloaded via
-#     curl, the folder is created if needed, and it is added to PATH in
-#     ~/.profile (custom-patched builds like zellij then win over distros)
+#   - Optionally installs universal helper scripts (currently osc52) on any
+#     supported shell platform, and Linux x64-only binaries (currently fzf, bat,
+#     eza, rg, ya, yazi, zellij, and fish) only on Linux x86_64/amd64 by
+#     default. The two lists live below so future assets can be classified in
+#     one obvious place. Missing tools are downloaded into ~/.local/bin from
+#     this repo's latest release assets when compatible or explicitly forced;
+#     the folder is created if needed, and it is added to PATH in ~/.profile
+#     (custom-patched builds like zellij then win over distros).
 #   - Adds shell integration for them to the managed ~/.bashrc block: the y()
 #     yazi wrapper, the zellij `z` alias, fzf keybindings/completion, and
 #     optional handoff into Fish for interactive shells when Fish is installed
@@ -36,11 +39,13 @@
 #   ./setupconfig.sh
 #   ./setupconfig.sh --install-optional
 #   ./setupconfig.sh --install-fish
+#   ./setupconfig.sh --install-x64-binaries --install-optional
 #
 #   or
 #   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --install-optional
 #   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --install-fish
+#   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --install-x64-binaries --install-optional
 
 set -euo pipefail
 
@@ -63,10 +68,16 @@ OSCYANK_FILE="$VIM_PLUGIN_DIR/oscyank.vim"
 readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE VIMRC_FILE INPUTRC_FILE FISH_CONFIG_FILE
 readonly VIM_DIR VIM_PLUGIN_DIR VIM_UNDO_DIR OSCYANK_FILE
 
-# When set (--install-optional / --install-fish), missing optional tools are
-# installed without prompting, even when the script runs without a TTY.
+# When set (--install-optional / --install-fish), compatible missing optional
+# assets are installed without prompting, even when the script runs without a
+# TTY. Linux x64-only assets still stay gated unless the platform matches or
+# --install-x64-binaries is passed.
 INSTALL_NICE_TO_HAVES=0
 INSTALL_FISH=0
+# Safety valve for unsupported systems: by default repo-provided compiled
+# binaries are offered only on Linux x86_64/amd64. Set by
+# --install-x64-binaries when the user intentionally wants to force them.
+INSTALL_X64_REPO_BINARIES=0
 
 # Remove temporary files on exit, including when set -e aborts mid-run.
 TEMP_FILES=()
@@ -85,12 +96,17 @@ Usage:
   ./setupconfig.sh
   ./setupconfig.sh --install-optional
   ./setupconfig.sh --install-fish
+  ./setupconfig.sh --install-x64-binaries --install-optional
 
-  --install-optional   install missing nice-to-have tools (fzf, bat, eza, rg, ya,
-                       yazi, zellij, osc52) without prompting, even in fully
-                       non-interactive runs (cron, CI, ssh -c)
-  --install-fish       install fish from this repo's release assets into
-                       ~/.local/bin without prompting
+  --install-optional   install compatible missing optional assets without
+                       prompting: universal helper scripts everywhere, plus
+                       Linux x64 binaries on Linux x86_64/amd64 only
+  --install-fish       install fish from this repo's Linux x64 release asset
+                       into ~/.local/bin without prompting when compatible
+  --install-x64-binaries
+                       force offering/installing this repo's Linux x64 binary
+                       assets on the current machine; use only when you know
+                       they are compatible
 EOF
 }
 
@@ -103,6 +119,10 @@ parse_args() {
         ;;
       --install-fish)
         INSTALL_FISH=1
+        shift
+        ;;
+      --install-x64-binaries)
+        INSTALL_X64_REPO_BINARIES=1
         shift
         ;;
       -h|--help)
@@ -338,23 +358,29 @@ ensure_dependencies() {
 }
 
 # ---------------------------------------------------------------------------
-# Optional ("nice to have") tools: fzf, bat, eza, rg, ya, yazi, zellij, osc52
+# Optional assets
 #
-# These ship as release assets of this GitHub repo and are
-# installed to ~/.local/bin, the conventional user-local executable location
-# on modern Linux systems. Only tools missing from that folder are downloaded;
-# the folder is created up front and is kept on PATH via the managed
-# ~/.profile block.
+# These ship as release assets of this GitHub repo and are installed to
+# ~/.local/bin, the conventional user-local executable location on modern
+# Linux systems. Keep architecture-specific and architecture-agnostic assets
+# separate so macOS, Raspberry Pi OS, Termux, and other ARM/non-Linux users can
+# safely take the portable shell/Vim/Fish config without receiving incompatible
+# Linux x64 binaries.
 # ---------------------------------------------------------------------------
 
 NICE_TO_HAVE_REPO="tychart/linuxstuff"
 # Used only when the GitHub API cannot be reached to resolve the latest tag.
 NICE_TO_HAVE_FALLBACK_TAG="v1.0.0"
 NICE_TO_HAVE_BIN_DIR="$HOME/.local/bin"
-# Names here are both the release asset names and the installed binary names.
-NICE_TO_HAVE_TOOLS=(fzf bat eza rg ya yazi zellij osc52)
-FISH_TOOLS=(fish)
-readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR NICE_TO_HAVE_TOOLS FISH_TOOLS
+# Names here are both the release asset names and the installed executable
+# names. Add future repo assets to exactly one list:
+#   - UNIVERSAL: scripts or other architecture-agnostic executables
+#   - X64: Linux x86_64/amd64 compiled binaries
+NICE_TO_HAVE_UNIVERSAL_TOOLS=(osc52)
+NICE_TO_HAVE_X64_TOOLS=(fzf bat eza rg ya yazi zellij)
+FISH_X64_TOOLS=(fish)
+readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR
+readonly NICE_TO_HAVE_UNIVERSAL_TOOLS NICE_TO_HAVE_X64_TOOLS FISH_X64_TOOLS
 
 # Cheap release-asset checks that need no extra tools: compiled binaries start
 # with the 4 magic bytes 0x7f 'E' 'L' 'F', while shell-script executables like
@@ -401,14 +427,50 @@ fetch_latest_release_tag() {
   printf '%s' "$NICE_TO_HAVE_FALLBACK_TAG"
 }
 
+lowercase() {
+  # Avoid Bash 4's ${var,,} so the installer can still run under macOS's
+  # older system Bash.
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+detected_platform() {
+  printf '%s/%s' "$(uname -s 2>/dev/null || printf unknown)" "$(uname -m 2>/dev/null || printf unknown)"
+}
+
+is_linux_x64() {
+  local os arch
+
+  os="$(uname -s 2>/dev/null || printf unknown)"
+  arch="$(uname -m 2>/dev/null || printf unknown)"
+
+  case "$os:$arch" in
+    Linux:x86_64|Linux:amd64) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+can_offer_linux_x64_assets() {
+  is_linux_x64 || [[ $INSTALL_X64_REPO_BINARIES == 1 ]]
+}
+
+log_skipped_linux_x64_assets() {
+  local label="$1"
+  shift
+
+  log "Skipping ${label}: repo assets are Linux x64-only; detected $(detected_platform)."
+  log "Install these tools with your platform package manager instead when available: $*"
+  log "If you intentionally want to force this repo's Linux x64 assets, re-run with --install-x64-binaries."
+}
+
 ensure_repo_binaries() {
   local prompt="$1"
   local auto_install="$2"
   local auto_flag_name="$3"
   local label="$4"
-  local tools_name="$5"
+  shift 4
+  local tools_ref=("$@")
   local dir="$NICE_TO_HAVE_BIN_DIR"
-  local -n tools_ref="$tools_name"
+  local label_lower
   local missing=()
   local present=()
   local tool
@@ -417,6 +479,12 @@ ensure_repo_binaries() {
   local dest
   local tmp
   local version
+
+  label_lower="$(lowercase "$label")"
+
+  if [[ ${#tools_ref[@]} -eq 0 ]]; then
+    return 0
+  fi
 
   if [[ ! -d $dir ]]; then
     mkdir -p "$dir"
@@ -441,25 +509,25 @@ ensure_repo_binaries() {
   done
 
   if [[ ${#missing[@]} -eq 0 ]]; then
-    log "All ${label,,} present in $dir"
+    log "All ${label_lower} present in $dir"
     return 0
   fi
 
   if ! command -v curl >/dev/null 2>&1; then
-    log "curl is required to install missing ${label,,} (${missing[*]}); skipping"
+    log "curl is required to install missing ${label_lower} (${missing[*]}); skipping"
     return 0
   fi
 
-  log "Missing ${label,,} from $dir: ${missing[*]}"
+  log "Missing ${label_lower} from $dir: ${missing[*]}"
 
   if [[ $auto_install != 1 ]] && ! confirm_prompt "$prompt"; then
-    log "Skipping ${label,,} installation."
+    log "Skipping ${label_lower} installation."
     log "Re-run with ${auto_flag_name} to install without prompting (also works in cron/CI)."
     return 0
   fi
 
   tag="$(fetch_latest_release_tag)"
-  log "Installing ${label,,} from release ${tag}"
+  log "Installing ${label_lower} from release ${tag}"
 
   for tool in "${missing[@]}"; do
     dest="$dir/$tool"
@@ -498,20 +566,35 @@ ensure_repo_binaries() {
 
 ensure_nice_to_haves() {
   ensure_repo_binaries \
-    "Download and install the missing nice-to-have tools?" \
+    "Download and install missing universal helper scripts (${NICE_TO_HAVE_UNIVERSAL_TOOLS[*]})?" \
     "$INSTALL_NICE_TO_HAVES" \
     "--install-optional" \
-    "Nice-to-have tools" \
-    NICE_TO_HAVE_TOOLS
+    "Universal helper scripts" \
+    "${NICE_TO_HAVE_UNIVERSAL_TOOLS[@]}"
+
+  if can_offer_linux_x64_assets; then
+    ensure_repo_binaries \
+      "Download and install missing Linux x64 nice-to-have binaries (${NICE_TO_HAVE_X64_TOOLS[*]})?" \
+      "$INSTALL_NICE_TO_HAVES" \
+      "--install-optional" \
+      "Linux x64 nice-to-have binaries" \
+      "${NICE_TO_HAVE_X64_TOOLS[@]}"
+  else
+    log_skipped_linux_x64_assets "Linux x64 nice-to-have binaries" "${NICE_TO_HAVE_X64_TOOLS[@]}"
+  fi
 }
 
 ensure_fish() {
-  ensure_repo_binaries \
-    "Download and install fish?" \
-    "$INSTALL_FISH" \
-    "--install-fish" \
-    "Fish" \
-    FISH_TOOLS
+  if can_offer_linux_x64_assets; then
+    ensure_repo_binaries \
+      "Download and install fish from this repo's Linux x64 release asset?" \
+      "$INSTALL_FISH" \
+      "--install-fish" \
+      "Fish Linux x64 binary" \
+      "${FISH_X64_TOOLS[@]}"
+  else
+    log_skipped_linux_x64_assets "fish binary" "${FISH_X64_TOOLS[@]}"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -895,7 +978,9 @@ fi
 if command -v eza >/dev/null 2>&1; then
   alias ll='eza -lag --git --icons --group-directories-first'
 else
-  alias ll='ls -lah --color=auto --group-directories-first'
+  # Portable fallback for systems whose ls does not support GNU color/grouping flags
+  # (macOS, Termux, BusyBox, etc.).
+  alias ll='ls -lah'
 fi
 
 if command -v bat >/dev/null 2>&1; then
@@ -923,7 +1008,9 @@ alias ver='cat /etc/*-release'
 alias vim='vim -u "$HOME/.vimrc"'
 alias whoson='last -w | tac'
 alias details='get_machine_info'
-alias z='zellij attach -c main'
+if command -v zellij >/dev/null 2>&1; then
+  alias z='zellij attach -c main'
+fi
 
 # Functions.
 mmkdir() {
@@ -983,6 +1070,11 @@ ssu() {
 
 y() {
   # Open yazi and change to the directory it left us in on exit.
+  if ! command -v yazi >/dev/null 2>&1; then
+    printf 'y: yazi is not installed; install it with your system package manager or this setup script on Linux x64.\n' >&2
+    return 127
+  fi
+
   local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
   command yazi "$@" --cwd-file="$tmp"
   IFS= read -r -d '' cwd < "$tmp"
@@ -1001,8 +1093,15 @@ if ! command -v osc52 >/dev/null 2>&1; then
           data="$(cat)"
       fi
 
-      printf '\033]52;c;%s\a' \
-          "$(printf '%s' "$data" | base64 -w0)"
+      local encoded
+
+      if base64 --wrap=0 </dev/null >/dev/null 2>&1; then
+          encoded="$(printf '%s' "$data" | base64 --wrap=0)"
+      else
+          encoded="$(printf '%s' "$data" | base64 | tr -d '\n')"
+      fi
+
+      printf '\033]52;c;%s\a' "$encoded"
   }
 fi
 
@@ -1212,7 +1311,8 @@ end
 if command -q eza
     abbr --add ll 'eza -lag --git --icons --group-directories-first'
 else
-    abbr --add ll 'ls -lah --color=auto --group-directories-first'
+    # Portable fallback for systems whose ls does not support GNU color/grouping flags.
+    abbr --add ll 'ls -lah'
 end
 
 if command -q bat
@@ -1236,7 +1336,9 @@ abbr --add k kubectl
 abbr --add ver 'cat /etc/*-release'
 abbr --add whoson 'last -w | tac'
 abbr --add details get_machine_info
-abbr --add z 'zellij attach -c main'
+if command -q zellij
+    abbr --add z 'zellij attach -c main'
+end
 
 # Reload Fish configuration.
 abbr --add src 'source "$__fish_config_dir/config.fish"'
@@ -1342,6 +1444,11 @@ function ssu --description 'Open root Fish shell using current user config and h
 end
 
 function y --description 'Open yazi and cd to the directory it leaves behind'
+    if not command -q yazi
+        printf 'y: yazi is not installed; install it with your system package manager or this setup script on Linux x64.\n' >&2
+        return 127
+    end
+
     set -l tmp (mktemp -t "yazi-cwd.XXXXXX")
     command yazi $argv --cwd-file="$tmp"
     if read -z cwd <"$tmp"; and test "$cwd" != "$PWD"; and test -d "$cwd"
