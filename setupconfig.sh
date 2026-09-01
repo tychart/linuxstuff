@@ -21,7 +21,7 @@
 #     over distros).
 #   - Adds shell integration for them to the managed ~/.bashrc block when
 #     ~/.bashrc already exists: the y()
-#     yazi wrapper, the zellij `z` alias, fzf keybindings/completion, and
+#     yazi wrapper, the zellij z alias, fzf keybindings/completion, and
 #     optional handoff into Fish for interactive shells when Fish is installed
 #   - Adds a tiny Fish handoff to ~/.zshrc when ~/.zshrc already exists
 #   - Keeps the yazi (yazi.toml, theme.toml) and zellij (config.kdl) configs
@@ -33,8 +33,8 @@
 #     package manager) when the flavor files are missing, so the theme
 #     referenced by the managed theme.toml actually loads
 #   - Nice-to-have installs prompt on the terminal, even when piped via
-#     `curl ... | bash` (the prompt opens /dev/tty). Fully non-interactive
-#     runs (cron, CI, ssh without a tty) skip instead, unless
+#     curl-pipe-to-bash runs (the prompt opens /dev/tty). Fully
+#     non-interactive runs (cron, CI, ssh without a tty) skip instead, unless
 #     --install-optional is passed, which auto-installs without prompting
 #
 # Usage:
@@ -106,6 +106,24 @@ cleanup_temp_files() {
 trap cleanup_temp_files EXIT
 register_temp_file() {
   TEMP_FILES[${#TEMP_FILES[@]}]="$1"
+}
+
+read_content() {
+  # Bash 3.2 can misparse heredocs inside $(...) command substitutions when
+  # the heredoc body contains shell metacharacters. Read heredocs directly
+  # instead; printf -v is available in Bash 3.2 and avoids eval.
+  local var_name="$1"
+  local line
+  local content=''
+
+  while IFS= read -r line; do
+    if [[ -n $content ]]; then
+      content="${content}"$'\n'
+    fi
+    content="${content}${line}"
+  done
+
+  printf -v "$var_name" '%s' "$content"
 }
 
 log() {
@@ -297,8 +315,8 @@ confirm_prompt() {
   local use_tty=false
 
   if [[ ! -t 0 ]]; then
-    # stdin is not a terminal (e.g. `curl ... | bash` feeds the script
-    # through a pipe): prompt on the controlling terminal instead. If there
+    # stdin is not a terminal (for example, curl-pipe-to-bash feeds the
+    # script through a pipe): prompt on the controlling terminal instead. If there
     # is no controlling terminal (cron, CI, ssh without a tty), this run is
     # truly non-interactive and cannot prompt. Never redirect fd 0 itself:
     # a piped script is still being read from stdin.
@@ -419,7 +437,7 @@ readonly NICE_TO_HAVE_UNIVERSAL_TOOLS NICE_TO_HAVE_X64_TOOLS FISH_X64_TOOLS
 # Cheap release-asset checks that need no extra tools: compiled binaries start
 # with the 4 magic bytes 0x7f 'E' 'L' 'F', while shell-script executables like
 # osc52 start with a shebang. Catches HTML error pages and truncated or corrupt
-# downloads without requiring the `file` command.
+# downloads without requiring the file command.
 is_elf_binary() {
   local magic
   magic="$(head -c 4 "$1" 2>/dev/null)"
@@ -462,8 +480,8 @@ fetch_latest_release_tag() {
 }
 
 lowercase() {
-  # Avoid Bash 4's ${var,,} so the installer can still run under macOS's
-  # older system Bash.
+  # Avoid Bash 4-only case-conversion expansion so the installer can still
+  # run under macOS's older system Bash.
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
@@ -853,18 +871,17 @@ SYSTEM_BASHRC_PATH=''
 SYSTEM_BASHRC_BLOCK=''
 if SYSTEM_BASHRC_PATH="$(detect_system_bashrc_path)"; then
   log "Will source system Bash defaults from ${SYSTEM_BASHRC_PATH} before user customizations in ~/.bashrc"
-  SYSTEM_BASHRC_BLOCK=$(cat <<EOF
+  read_content SYSTEM_BASHRC_BLOCK <<EOF
 # Source distro-provided Bash defaults before user customizations.
 if [ -r "${SYSTEM_BASHRC_PATH}" ]; then
   . "${SYSTEM_BASHRC_PATH}"
 fi
 EOF
-)
 else
   log "No known system Bash rc for this OS; leaving any existing ~/.bashrc fully self-managed"
 fi
 
-PROFILE_CONTENT=$(cat <<'EOF'
+read_content PROFILE_CONTENT <<'EOF'
 # Login shells read ~/.profile first, then pull in ~/.bashrc for interactive extras.
 # The guard avoids an infinite loop when ~/.bashrc later sources ~/.profile.
 # Use expr instead of a case statement here to keep this block friendly to
@@ -917,18 +934,16 @@ export VISUAL="__DEFAULT_EDITOR__"
 export SYSTEMD_EDITOR="__DEFAULT_EDITOR__"
 export INPUTRC="${INPUTRC:-$HOME/.inputrc}"
 EOF
-)
 PROFILE_CONTENT="${PROFILE_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 
-BASH_PROFILE_CONTENT=$(cat <<'EOF'
+read_content BASH_PROFILE_CONTENT <<'EOF'
 # Ensure Bash login shells also load ~/.profile.
 if [ -r "$HOME/.profile" ]; then
   . "$HOME/.profile"
 fi
 EOF
-)
 
-ZSHRC_CONTENT=$(cat <<'EOF'
+read_content ZSHRC_CONTENT <<'EOF'
 # Prefer Fish for interactive Zsh work when it is installed.
 # This stays tiny on purpose: the full shell setup lives in Fish/Bash config,
 # and missing Fish should never break Zsh startup.
@@ -936,9 +951,8 @@ if [[ -o interactive ]] && [[ -z "${FISH_VERSION:-}" ]] && command -v fish >/dev
   exec "$(command -v fish)"
 fi
 EOF
-)
 
-BASHRC_CONTENT=$(cat <<'EOF'
+read_content BASHRC_CONTENT <<'EOF'
 # Editor defaults should exist before any early return so child CLI tools inherit them.
 export EDITOR="${EDITOR:-__DEFAULT_EDITOR__}"
 export VISUAL="${VISUAL:-$EDITOR}"
@@ -1195,11 +1209,10 @@ bind -x '"\C-h": my_custom_backwards_kill_word'
 # Ctrl+W is rebound to match the custom Ctrl+Backspace behavior above.
 bind -x '"\C-w": my_custom_backwards_kill_word'
 EOF
-)
 BASHRC_CONTENT="${BASHRC_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 BASHRC_CONTENT="${BASHRC_CONTENT/__SYSTEM_BASHRC_BLOCK__/$SYSTEM_BASHRC_BLOCK}"
 
-VIMRC_CONTENT=$(cat <<'EOF'
+read_content VIMRC_CONTENT <<'EOF'
 set nocompatible
 
 syntax on
@@ -1283,9 +1296,8 @@ augroup setupconfig_vim_startup
     \ endif
 augroup END
 EOF
-)
 
-FISH_CONFIG_CONTENT=$(cat <<'EOF'
+read_content FISH_CONFIG_CONTENT <<'EOF'
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
@@ -1537,10 +1549,9 @@ function fish_prompt
     printf ' %s ' "$prompt_symbol"
 end
 EOF
-)
 FISH_CONFIG_CONTENT="${FISH_CONFIG_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 
-INPUTRC_CONTENT=$(cat <<'EOF'
+read_content INPUTRC_CONTENT <<'EOF'
 set input-meta on
 set output-meta on
 set bell-style none
@@ -1573,11 +1584,10 @@ $if term=rxvt
 $endif
 $endif
 EOF
-)
 
 # Install a small custom Vim plugin so copy works reliably in SSH, tmux, and other remote terminals.
 # It uses OSC 52 escape sequences instead of depending on xclip/pbcopy or a local GUI clipboard.
-OSCYANK_PLUGIN_CONTENT=$(cat <<'EOF'
+read_content OSCYANK_PLUGIN_CONTENT <<'EOF'
 " -------------------- INIT --------------------------------
 if exists('g:loaded_oscyank')
   finish
@@ -1751,7 +1761,6 @@ command! -register OSCYankRegister call OSCYankRegister('<reg>')
 nnoremap <expr> <Plug>OSCYankOperator OSCYankOperator()
 vnoremap <Plug>OSCYankVisual :OSCYankVisual<CR>
 EOF
-)
 
 log "Applying managed configuration blocks"
 mkdir -p "$VIM_PLUGIN_DIR" "$VIM_UNDO_DIR"
