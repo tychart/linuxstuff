@@ -81,7 +81,7 @@ INSTALL_X64_REPO_BINARIES=0
 
 # Remove temporary files on exit, including when set -e aborts mid-run.
 TEMP_FILES=()
-trap 'rm -f -- "${TEMP_FILES[@]}" 2>/dev/null || true' EXIT
+trap 'rm -f "${TEMP_FILES[@]}" 2>/dev/null || true' EXIT
 register_temp_file() {
   TEMP_FILES+=("$1")
 }
@@ -388,13 +388,13 @@ readonly NICE_TO_HAVE_UNIVERSAL_TOOLS NICE_TO_HAVE_X64_TOOLS FISH_X64_TOOLS
 # downloads without requiring the `file` command.
 is_elf_binary() {
   local magic
-  magic="$(head -c 4 -- "$1" 2>/dev/null)"
+  magic="$(head -c 4 "$1" 2>/dev/null)"
   [[ "$magic" == $'\x7fELF' ]]
 }
 
 is_shebang_script() {
   local magic
-  magic="$(head -c 2 -- "$1" 2>/dev/null)"
+  magic="$(head -c 2 "$1" 2>/dev/null)"
   [[ "$magic" == '#!' ]]
 }
 
@@ -492,13 +492,13 @@ ensure_repo_binaries() {
   fi
 
   shopt -s nullglob
-  rm -f -- "$dir"/.*.part.*
+  rm -f "$dir"/.*.part.*
   shopt -u nullglob
 
   for tool in "${tools_ref[@]}"; do
     dest="$dir/$tool"
     if [[ -s $dest ]] && is_valid_release_executable "$dest"; then
-      chmod +x -- "$dest" 2>/dev/null || true
+      chmod +x "$dest" 2>/dev/null || true
       log "${label} '$tool' already installed ($dest)"
     else
       if [[ -e $dest ]]; then
@@ -536,19 +536,19 @@ ensure_repo_binaries() {
     url="https://github.com/${NICE_TO_HAVE_REPO}/releases/download/${tag}/${tool}"
 
     if ! curl -fL --retry 3 --progress-bar -o "$tmp" "$url"; then
-      rm -f -- "$tmp"
+      rm -f "$tmp"
       log "Failed to download ${tool} from ${url}"
       continue
     fi
 
     if ! is_valid_release_executable "$tmp"; then
-      rm -f -- "$tmp"
+      rm -f "$tmp"
       log "Downloaded ${tool} is not a valid release executable (from ${url}); not installing"
       continue
     fi
 
-    chmod 755 -- "$tmp"
-    mv -f -- "$tmp" "$dest"
+    chmod 755 "$tmp"
+    mv -f "$tmp" "$dest"
     log "Installed ${tool} -> ${dest} (release ${tag})"
 
     if version="$("$dest" --version 2>/dev/null | head -n 1)" && [[ -n $version ]]; then
@@ -643,7 +643,7 @@ rotate_config_backup() {
     backup="${file}.bak${n}"
   done
 
-  mv -f -- "$file" "$backup"
+  mv -f "$file" "$backup"
   log "Rotated existing $file -> $backup"
 }
 
@@ -664,51 +664,51 @@ install_one_config() {
   fi
 
   url="${CONFIG_SOURCE_URL_BASE}/${remote_path}"
-  dir="$(dirname -- "$dest")"
-  mkdir -p -- "$dir"
+  dir="$(dirname "$dest")"
+  mkdir -p "$dir"
 
   # Remove stale partial downloads from any previously interrupted run.
   shopt -s nullglob
-  rm -f -- "$dir"/.*.config.part.*
+  rm -f "$dir"/.*.config.part.*
   shopt -u nullglob
 
-  tmp="$(mktemp -- "$dir/.${tool}.config.part.XXXXXX")"
+  tmp="$(mktemp "$dir/.${tool}.config.part.XXXXXX")"
   register_temp_file "$tmp"
 
   if ! curl -fL --retry 3 -sS -o "$tmp" "$url"; then
-    rm -f -- "$tmp"
+    rm -f "$tmp"
     log "Failed to download ${url}; leaving any existing config untouched"
     return 0
   fi
 
   if [[ ! -s $tmp ]]; then
-    rm -f -- "$tmp"
+    rm -f "$tmp"
     log "Downloaded ${url} is empty; not installing"
     return 0
   fi
 
   # Cheap guard against HTML error pages served with a 200 status; none of
   # these config formats starts with '<'.
-  if [[ $(head -c 1 -- "$tmp") == '<' ]]; then
-    rm -f -- "$tmp"
+  if [[ $(head -c 1 "$tmp") == '<' ]]; then
+    rm -f "$tmp"
     log "Downloaded ${url} looks like an HTML error page; not installing"
     return 0
   fi
 
   # mktemp creates 0600 files; configs should be the usual 0644 before they
   # are moved into place.
-  chmod 644 -- "$tmp"
+  chmod 644 "$tmp"
 
   if [[ -e $dest && ! -d $dest ]]; then
-    if cmp -s -- "$dest" "$tmp"; then
-      rm -f -- "$tmp"
+    if cmp -s "$dest" "$tmp"; then
+      rm -f "$tmp"
       log "${tool} config unchanged (${dest})"
       return 0
     fi
     rotate_config_backup "$dest"
   fi
 
-  mv -f -- "$tmp" "$dest"
+  mv -f "$tmp" "$dest"
   log "Installed ${tool} config -> ${dest}"
 }
 
@@ -787,10 +787,10 @@ ensure_bun_node_shim() {
     return 0
   fi
 
-  mkdir -p -- "$HOME/.local/bin"
+  mkdir -p "$HOME/.local/bin"
 
   if [[ -L $node_shim ]]; then
-    if [[ $(readlink -- "$node_shim") == "$bun_bin" ]]; then
+    if [[ $(readlink "$node_shim") == "$bun_bin" ]]; then
       log "Bun node compatibility shim already present (${node_shim})"
       return 0
     fi
@@ -803,7 +803,7 @@ ensure_bun_node_shim() {
     return 0
   fi
 
-  ln -s -- "$bun_bin" "$node_shim"
+  ln -s "$bun_bin" "$node_shim"
   log "Installed Bun node compatibility shim -> ${node_shim}"
 }
 
@@ -1019,7 +1019,7 @@ mmkdir() {
     return 1
   fi
 
-  command mkdir -p -- "$1" && cd -- "$1"
+  command mkdir -p "$1" && cd -- "$1"
 }
 
 get_machine_info() {
@@ -1079,7 +1079,7 @@ y() {
   command yazi "$@" --cwd-file="$tmp"
   IFS= read -r -d '' cwd < "$tmp"
   [ "$cwd" != "$PWD" ] && [ -d "$cwd" ] && builtin cd -- "$cwd"
-  command rm -f -- "$tmp"
+  command rm -f "$tmp"
 }
 
 
@@ -1360,7 +1360,7 @@ function mmkdir --description 'Create a directory and enter it'
         return 1
     end
 
-    command mkdir -p -- "$argv[1]"
+    command mkdir -p "$argv[1]"
     and builtin cd -- "$argv[1]"
 end
 
@@ -1454,7 +1454,7 @@ function y --description 'Open yazi and cd to the directory it leaves behind'
     if read -z cwd <"$tmp"; and test "$cwd" != "$PWD"; and test -d "$cwd"
         builtin cd -- "$cwd"
     end
-    command rm -f -- "$tmp"
+    command rm -f "$tmp"
 end
 
 # ---------------------------------------------------------------------------
