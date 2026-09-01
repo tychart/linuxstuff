@@ -17,10 +17,13 @@
 #     one obvious place. Missing tools are downloaded into ~/.local/bin from
 #     this repo's latest release assets when compatible or explicitly forced;
 #     the folder is created if needed, and it is added to PATH in ~/.profile
-#     (custom-patched builds like zellij then win over distros).
-#   - Adds shell integration for them to the managed ~/.bashrc block: the y()
+#     when that file already exists (custom-patched builds like zellij then win
+#     over distros).
+#   - Adds shell integration for them to the managed ~/.bashrc block when
+#     ~/.bashrc already exists: the y()
 #     yazi wrapper, the zellij `z` alias, fzf keybindings/completion, and
 #     optional handoff into Fish for interactive shells when Fish is installed
+#   - Adds a tiny Fish handoff to ~/.zshrc when ~/.zshrc already exists
 #   - Keeps the yazi (yazi.toml, theme.toml) and zellij (config.kdl) configs
 #     under ${XDG_CONFIG_HOME:-~/.config} in sync with the repo whenever the
 #     matching tool is installed (no prompt): a changed file rotates the
@@ -58,6 +61,7 @@ readonly DEFAULT_EDITOR
 PROFILE_FILE="$HOME/.profile"
 BASH_PROFILE_FILE="$HOME/.bash_profile"
 BASHRC_FILE="$HOME/.bashrc"
+ZSHRC_FILE="$HOME/.zshrc"
 VIMRC_FILE="$HOME/.vimrc"
 INPUTRC_FILE="$HOME/.inputrc"
 FISH_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
@@ -65,7 +69,7 @@ VIM_DIR="$HOME/.vim"
 VIM_PLUGIN_DIR="$VIM_DIR/plugin"
 VIM_UNDO_DIR="$VIM_DIR/undodir"
 OSCYANK_FILE="$VIM_PLUGIN_DIR/oscyank.vim"
-readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE VIMRC_FILE INPUTRC_FILE FISH_CONFIG_FILE
+readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE ZSHRC_FILE VIMRC_FILE INPUTRC_FILE FISH_CONFIG_FILE
 readonly VIM_DIR VIM_PLUGIN_DIR VIM_UNDO_DIR OSCYANK_FILE
 
 # When set (--install-optional / --install-fish), compatible missing optional
@@ -200,6 +204,18 @@ upsert_managed_block() {
   mv "$tmp" "$file"
   rm -f "$preserved_tmp"
   log "Updated managed block '$name' in $file"
+}
+
+upsert_existing_managed_block() {
+  local file="$1"
+  local name="$2"
+
+  if [[ ! -e $file ]]; then
+    log "Skipping managed block '$name': $file does not exist"
+    return 0
+  fi
+
+  upsert_managed_block "$@"
 }
 
 write_managed_file() {
@@ -827,16 +843,16 @@ fi
 EOF
 )
 else
-  log "No known system Bash rc for this OS; leaving ~/.bashrc fully self-managed"
+  log "No known system Bash rc for this OS; leaving any existing ~/.bashrc fully self-managed"
 fi
 
 PROFILE_CONTENT=$(cat <<'EOF'
 # Login shells read ~/.profile first, then pull in ~/.bashrc for interactive extras.
 # The guard avoids an infinite loop when ~/.bashrc later sources ~/.profile.
-if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ] && [ -z "${__SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
-  case $- in
-    *i*) . "$HOME/.bashrc" ;;
-  esac
+# Use expr instead of a case statement here to keep this block friendly to
+# older/vendor shells that may read ~/.profile.
+if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ] && [ -z "${__SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC:-}" ] && expr "x$-" : 'x.*i' >/dev/null 2>&1; then
+  . "$HOME/.bashrc"
 fi
 
 # Prefer user-local bin directories when they exist. Directories are
@@ -866,8 +882,9 @@ fi
 # Collapse duplicate entries left over from older profiles while keeping the
 # first occurrence, so the precedence above is preserved.
 __setupconfig_dedupe_path() {
-  local result='' entry
-  local IFS=':'
+  result=''
+  old_ifs=$IFS
+  IFS=':'
   for entry in $PATH; do
     [ -z "$entry" ] && continue
     case ":$result:" in
@@ -875,10 +892,12 @@ __setupconfig_dedupe_path() {
       *) result="${result:+$result:}$entry" ;;
     esac
   done
+  IFS=$old_ifs
   printf '%s' "$result"
 }
 PATH="$(__setupconfig_dedupe_path)"
 unset -f __setupconfig_dedupe_path
+unset result entry old_ifs
 export PATH
 
 # Editor defaults live here so other tools can simply inherit them.
@@ -898,16 +917,23 @@ fi
 EOF
 )
 
+ZSHRC_CONTENT=$(cat <<'EOF'
+# Prefer Fish for interactive Zsh work when it is installed.
+# This stays tiny on purpose: the full shell setup lives in Fish/Bash config,
+# and missing Fish should never break Zsh startup.
+if [[ -o interactive ]] && [[ -z "${FISH_VERSION:-}" ]] && command -v fish >/dev/null 2>&1; then
+  exec "$(command -v fish)"
+fi
+EOF
+)
+
 BASHRC_CONTENT=$(cat <<'EOF'
 # Editor defaults should exist before any early return so child CLI tools inherit them.
 export EDITOR="${EDITOR:-__DEFAULT_EDITOR__}"
 export VISUAL="${VISUAL:-$EDITOR}"
 
 # Stop here for non-interactive shells.
-case $- in
-  *i*) ;;
-  *) return ;;
-esac
+[[ $- == *i* ]] || return
 
 # ~/.profile sources this file back, both in its managed block and in
 # preserved user content. If we are already inside such a source, stop:
@@ -1716,9 +1742,10 @@ EOF
 log "Applying managed configuration blocks"
 mkdir -p "$VIM_PLUGIN_DIR" "$VIM_UNDO_DIR"
 
-upsert_managed_block "$PROFILE_FILE" "profile" "$PROFILE_CONTENT"
-upsert_managed_block "$BASH_PROFILE_FILE" "bash_profile" "$BASH_PROFILE_CONTENT"
-upsert_managed_block "$BASHRC_FILE" "bashrc" "$BASHRC_CONTENT"
+upsert_existing_managed_block "$PROFILE_FILE" "profile" "$PROFILE_CONTENT"
+upsert_existing_managed_block "$BASH_PROFILE_FILE" "bash_profile" "$BASH_PROFILE_CONTENT"
+upsert_existing_managed_block "$BASHRC_FILE" "bashrc" "$BASHRC_CONTENT"
+upsert_existing_managed_block "$ZSHRC_FILE" "zshrc" "$ZSHRC_CONTENT"
 upsert_managed_block "$FISH_CONFIG_FILE" "fish" "$FISH_CONFIG_CONTENT"
 upsert_managed_block "$VIMRC_FILE" "vimrc" "$VIMRC_CONTENT" '"'
 upsert_managed_block "$INPUTRC_FILE" "inputrc" "$INPUTRC_CONTENT"
@@ -1732,5 +1759,5 @@ if command -v git >/dev/null 2>&1; then
   git config --global alias.lg "log --graph --all --decorate --pretty=format:'%C(blue)%h%Creset%C(yellow)%d%Creset %s %C(blue)%an%Creset %C(green)(%ar)%Creset'"
 fi
 
-log "Done. Open a new shell (or run: source ~/.profile) to pick up PATH changes."
+log "Done. Open a new shell to pick up PATH and shell configuration changes."
 log "If Vim is already open, restart it to load updated config/plugin."
