@@ -873,41 +873,21 @@ if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ] && [ -z "${__SETUPCONFIG
   . "$HOME/.bashrc"
 fi
 
-# Prefer user-local bin directories when they exist. Directories are
-# prepended in reverse list order, so the last entry (~/.local/bin) ends up
-# first. Missing directories are skipped so broken entries stay off PATH.
-__setupconfig_path_has() {
-  wanted=$1
-  old_ifs=$IFS
-  IFS=':'
-  found=1
-  for entry in $PATH; do
-    if [ "$entry" = "$wanted" ]; then
-      found=0
-      break
-    fi
-  done
-  IFS=$old_ifs
-  return "$found"
-}
-
-for dir in "$HOME/bin" "$HOME/.local/bin"; do
-  if [ -d "$dir" ] && ! __setupconfig_path_has "$dir"; then
-    PATH="$dir:$PATH"
-  fi
-done
+# Prefer user-local bin directories when they exist. Add them first, then
+# dedupe once below so rerunning/sourceing this block does not grow PATH.
+[ -d "$HOME/bin" ] && PATH="$HOME/bin:$PATH"
+[ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH"
 
 # Bun: configure it only when installed so shells that do not use Bun pay
 # almost no startup cost.
 if [ -d "$HOME/.bun" ]; then
   export BUN_INSTALL="$HOME/.bun"
-  if [ -d "$BUN_INSTALL/bin" ] && ! __setupconfig_path_has "$BUN_INSTALL/bin"; then
-    PATH="$BUN_INSTALL/bin:$PATH"
-  fi
+  [ -d "$BUN_INSTALL/bin" ] && PATH="$BUN_INSTALL/bin:$PATH"
 fi
 
-# Collapse duplicate entries left over from older profiles while keeping the
-# first occurrence, so the precedence above is preserved.
+# Collapse duplicate entries while keeping the first occurrence, so the
+# precedence above is preserved. Written without Bash-only locals so this
+# block stays safe in ~/.profile on macOS/vendor shells.
 __setupconfig_dedupe_path() {
   result=''
   old_ifs=$IFS
@@ -921,16 +901,14 @@ __setupconfig_dedupe_path() {
         break
       fi
     done
-    if [ "$duplicate" -eq 0 ]; then
-      result="${result:+$result:}$entry"
-    fi
+    [ "$duplicate" -eq 0 ] && result="${result:+$result:}$entry"
   done
   IFS=$old_ifs
   printf '%s' "$result"
 }
 PATH="$(__setupconfig_dedupe_path)"
-unset -f __setupconfig_path_has __setupconfig_dedupe_path
-unset wanted result entry existing found duplicate old_ifs
+unset -f __setupconfig_dedupe_path
+unset result entry existing duplicate old_ifs
 export PATH
 
 # Editor defaults live here so other tools can simply inherit them.
