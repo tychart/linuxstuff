@@ -1279,7 +1279,7 @@ augroup setupconfig_vim_startup
   autocmd!
   autocmd BufReadPost *
     \ if line("'\"") > 0 && line("'\"") <= line('$') && &filetype !~# 'commit' |
-    \   execute 'normal! g`"' |
+    \   execute 'normal! g' . nr2char(96) . '"' |
     \ endif
 augroup END
 EOF
@@ -1585,8 +1585,9 @@ endif
 let g:loaded_oscyank = 1
 
 " -------------------- VARIABLES ---------------------------
+let s:mark = nr2char(96)
 let s:commands = {
-  \ 'operator': {'block': '`[\<C-v>`]y', 'char': '`[v`]y', 'line': "'[V']y"},
+  \ 'operator': {'block': s:mark . '[\<C-v>' . s:mark . ']y', 'char': s:mark . '[v' . s:mark . ']y', 'line': "'[V']y"},
   \ 'visual': {'': 'gvy', 'V': 'gvy', 'v': 'gvy', '\x16': 'gvy'}}
 let s:b64_table = [
   \ 'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P',
