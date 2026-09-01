@@ -58,6 +58,17 @@ readonly SCRIPT_TAG
 DEFAULT_EDITOR="vim"
 readonly DEFAULT_EDITOR
 
+require_supported_bash() {
+  # macOS still ships Bash 3.2.x by default. Keep this script compatible with
+  # 3.2 and newer, and fail clearly if someone runs it with an older Bash.
+  if (( BASH_VERSINFO[0] < 3 || (BASH_VERSINFO[0] == 3 && BASH_VERSINFO[1] < 2) )); then
+    printf '[setup] Bash 3.2 or newer is required; found %s\n' "${BASH_VERSION:-unknown}" >&2
+    exit 2
+  fi
+}
+
+require_supported_bash
+
 PROFILE_FILE="$HOME/.profile"
 BASH_PROFILE_FILE="$HOME/.bash_profile"
 BASHRC_FILE="$HOME/.bashrc"
@@ -85,9 +96,16 @@ INSTALL_X64_REPO_BINARIES=0
 
 # Remove temporary files on exit, including when set -e aborts mid-run.
 TEMP_FILES=()
-trap 'rm -f "${TEMP_FILES[@]}" 2>/dev/null || true' EXIT
+cleanup_temp_files() {
+  # Bash 3.2 (the default /bin/bash on older macOS installs) can treat an
+  # empty array expansion as unbound under set -u, so check the count first.
+  if [[ ${#TEMP_FILES[@]} -gt 0 ]]; then
+    rm -f "${TEMP_FILES[@]}" 2>/dev/null || true
+  fi
+}
+trap cleanup_temp_files EXIT
 register_temp_file() {
-  TEMP_FILES+=("$1")
+  TEMP_FILES[${#TEMP_FILES[@]}]="$1"
 }
 
 log() {
@@ -337,8 +355,8 @@ ensure_dependencies() {
   local pkg
   local display_cmd=''
 
-  command -v git >/dev/null 2>&1 || missing+=(git)
-  command -v vim >/dev/null 2>&1 || missing+=(vim)
+  command -v git >/dev/null 2>&1 || missing[${#missing[@]}]=git
+  command -v vim >/dev/null 2>&1 || missing[${#missing[@]}]=vim
 
   if [[ ${#missing[@]} -eq 0 ]]; then
     return 0
@@ -352,7 +370,7 @@ ensure_dependencies() {
 
   for dep in "${missing[@]}"; do
     if pkg="$(package_name_for "$pm" "$dep")"; then
-      packages+=("$pkg")
+      packages[${#packages[@]}]="$pkg"
     fi
   done
 
@@ -520,7 +538,7 @@ ensure_repo_binaries() {
       if [[ -e $dest ]]; then
         log "${label} '$tool' exists at $dest but is empty or not a valid release executable; re-downloading"
       fi
-      missing+=("$tool")
+      missing[${#missing[@]}]="$tool"
     fi
   done
 
@@ -575,7 +593,7 @@ ensure_repo_binaries() {
   done
 
   for tool in "${tools_ref[@]}"; do
-    [[ -x $dir/$tool ]] && present+=("$tool")
+    [[ -x $dir/$tool ]] && present[${#present[@]}]="$tool"
   done
   log "${label} present in ${dir}: ${present[*]:-none}"
 }
@@ -858,12 +876,24 @@ fi
 # Prefer user-local bin directories when they exist. Directories are
 # prepended in reverse list order, so the last entry (~/.local/bin) ends up
 # first. Missing directories are skipped so broken entries stay off PATH.
+__setupconfig_path_has() {
+  wanted=$1
+  old_ifs=$IFS
+  IFS=':'
+  found=1
+  for entry in $PATH; do
+    if [ "$entry" = "$wanted" ]; then
+      found=0
+      break
+    fi
+  done
+  IFS=$old_ifs
+  return "$found"
+}
+
 for dir in "$HOME/bin" "$HOME/.local/bin"; do
-  if [ -d "$dir" ]; then
-    case ":$PATH:" in
-      *":$dir:"*) ;;
-      *) PATH="$dir:$PATH" ;;
-    esac
+  if [ -d "$dir" ] && ! __setupconfig_path_has "$dir"; then
+    PATH="$dir:$PATH"
   fi
 done
 
@@ -871,11 +901,8 @@ done
 # almost no startup cost.
 if [ -d "$HOME/.bun" ]; then
   export BUN_INSTALL="$HOME/.bun"
-  if [ -d "$BUN_INSTALL/bin" ]; then
-    case ":$PATH:" in
-      *":$BUN_INSTALL/bin:"*) ;;
-      *) PATH="$BUN_INSTALL/bin:$PATH" ;;
-    esac
+  if [ -d "$BUN_INSTALL/bin" ] && ! __setupconfig_path_has "$BUN_INSTALL/bin"; then
+    PATH="$BUN_INSTALL/bin:$PATH"
   fi
 fi
 
@@ -887,17 +914,23 @@ __setupconfig_dedupe_path() {
   IFS=':'
   for entry in $PATH; do
     [ -z "$entry" ] && continue
-    case ":$result:" in
-      *":$entry:"*) ;;
-      *) result="${result:+$result:}$entry" ;;
-    esac
+    duplicate=0
+    for existing in $result; do
+      if [ "$existing" = "$entry" ]; then
+        duplicate=1
+        break
+      fi
+    done
+    if [ "$duplicate" -eq 0 ]; then
+      result="${result:+$result:}$entry"
+    fi
   done
   IFS=$old_ifs
   printf '%s' "$result"
 }
 PATH="$(__setupconfig_dedupe_path)"
-unset -f __setupconfig_dedupe_path
-unset result entry old_ifs
+unset -f __setupconfig_path_has __setupconfig_dedupe_path
+unset wanted result entry existing found duplicate old_ifs
 export PATH
 
 # Editor defaults live here so other tools can simply inherit them.
@@ -974,11 +1007,13 @@ __setupconfig_history_sync() {
   history -n
 }
 
-case ";${PROMPT_COMMAND:-};" in
-  *";__setupconfig_history_sync;"*) ;;
-  '') PROMPT_COMMAND="__setupconfig_history_sync" ;;
-  *)  PROMPT_COMMAND="__setupconfig_history_sync;${PROMPT_COMMAND}" ;;
-esac
+if expr "x;${PROMPT_COMMAND:-};" : 'x.*;__setupconfig_history_sync;.*' >/dev/null 2>&1; then
+  :
+elif [ -z "${PROMPT_COMMAND:-}" ]; then
+  PROMPT_COMMAND="__setupconfig_history_sync"
+else
+  PROMPT_COMMAND="__setupconfig_history_sync;${PROMPT_COMMAND}"
+fi
 export PROMPT_COMMAND
 
 # Bash completion.
