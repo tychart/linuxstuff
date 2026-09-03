@@ -409,7 +409,7 @@ This is a script to auto type in a password based on Gnome Keyrings
 #!/usr/bin/env bash
 set -euo pipefail
 
-password="$(secret-tool lookup purpose sudo-password)"
+password="$(secret-tool lookup application sudo-password name typepassword)"
 
 if [[ -z "${password}" ]]; then
     notify-send "sudo hotkey" "No sudo password found or keyring is locked"
