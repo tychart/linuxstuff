@@ -18,3 +18,8 @@ keybinds {
 }
 
 copy_on_select false
+show_startup_tips false
+support_kitty_keyboard_protocol true
+
+// Uncomment the following line if using fish instead of default terminal
+// default_shell "fish"
