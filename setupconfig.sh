@@ -1387,9 +1387,12 @@ abbr --add k kubectl
 abbr --add ver 'cat /etc/*-release'
 abbr --add whoson 'last -w | tac'
 abbr --add details get_machine_info
+
+# Launch a throwaway, ephemeral Zellij instance"
 if command -q zellij
-    abbr --add z 'zellij attach -c main'
+    abbr --add z "zellij options --session-serialization false"
 end
+
 
 # Reload Fish configuration.
 abbr --add src 'source "$__fish_config_dir/config.fish"'
