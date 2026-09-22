@@ -928,6 +928,9 @@ unset -f __setupconfig_dedupe_path
 unset result entry existing duplicate old_ifs
 export PATH
 
+# Extra path aditions go here
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
+
 # Editor defaults live here so other tools can simply inherit them.
 export EDITOR="__DEFAULT_EDITOR__"
 export VISUAL="__DEFAULT_EDITOR__"
