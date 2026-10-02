@@ -1,0 +1,203 @@
+#!/bin/sh
+
+# Copy text to the terminal's clipboard with OSC 52.
+# Requires only a POSIX shell and standard macOS/Linux command-line tools.
+
+set -eu
+
+PROGRAM=${0##*/}
+VERSION=2.0.0
+
+usage() {
+    cat <<EOF
+Usage:
+  $PROGRAM [TEXT_OR_FILE]
+  $PROGRAM --text TEXT
+  $PROGRAM --file FILE
+  COMMAND | $PROGRAM
+
+Copy data to the terminal clipboard using OSC 52.
+
+With one unqualified argument, an existing regular file is copied; otherwise,
+the argument itself is copied as text. Exactly one argument is accepted.
+
+Options:
+  -t, --text TEXT  Always treat the argument as literal text
+  -f, --file FILE  Always treat the argument as a file path
+  -h, --help       Show this help
+  -V, --version    Show the version
+      --           End option parsing (useful for paths beginning with "-")
+
+Environment:
+  OSC52_MAX_BYTES  Reject larger inputs (unset or 0 means no limit)
+  OSC52_TTY        Terminal device to use (default: /dev/tty; "-" means stdout)
+EOF
+}
+
+error() {
+    printf '%s: %s\n' "$PROGRAM" "$*" >&2
+    exit 2
+}
+
+mode=auto
+
+case ${1-} in
+    -h|--help)
+        [ "$#" -eq 1 ] || error "--help does not accept arguments"
+        usage
+        exit 0
+        ;;
+    -V|--version)
+        [ "$#" -eq 1 ] || error "--version does not accept arguments"
+        printf '%s %s\n' "$PROGRAM" "$VERSION"
+        exit 0
+        ;;
+    -t|--text)
+        [ "$#" -ge 2 ] || error "--text requires an argument"
+        [ "$#" -eq 2 ] || error "expected one text argument; received $(($# - 1))"
+        mode=text
+        shift
+        ;;
+    -f|--file)
+        [ "$#" -ge 2 ] || error "--file requires an argument"
+        [ "$#" -eq 2 ] || error "expected one file argument; received $(($# - 1))"
+        mode=file
+        shift
+        ;;
+    --)
+        shift
+        [ "$#" -le 1 ] || error "expected at most one argument; received $#"
+        ;;
+    -?*)
+        error "unknown option '$1' (use --text for literal text beginning with '-')"
+        ;;
+    *)
+        [ "$#" -le 1 ] || error "expected at most one argument; received $#"
+        ;;
+esac
+
+payload_tmp=
+base64_tmp=
+encoded_tmp=
+
+cleanup() {
+    [ -z "$payload_tmp" ] || rm -f -- "$payload_tmp"
+    [ -z "$base64_tmp" ] || rm -f -- "$base64_tmp"
+    [ -z "$encoded_tmp" ] || rm -f -- "$encoded_tmp"
+}
+
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+make_temp() {
+    temp_root=${TMPDIR:-/tmp}
+    mktemp "$temp_root/$PROGRAM.XXXXXXXXXX" || error "could not create a temporary file"
+}
+
+umask 077
+
+# Resolve the input without storing file contents in a shell variable. Shell
+# variables cannot safely represent NUL bytes or preserve arbitrary file data.
+if [ "$#" -eq 0 ]; then
+    [ ! -t 0 ] || {
+        usage >&2
+        exit 2
+    }
+
+    payload_tmp=$(make_temp)
+    cat >"$payload_tmp" || error "could not read standard input"
+    input=$payload_tmp
+else
+    argument=$1
+
+    case $mode in
+        text)
+            payload_tmp=$(make_temp)
+            printf '%s' "$argument" >"$payload_tmp" || error "could not prepare input"
+            input=$payload_tmp
+            ;;
+        file)
+            [ -f "$argument" ] || error "file not found or not a regular file: $argument"
+            input=$argument
+            ;;
+        auto)
+            if [ -f "$argument" ]; then
+                input=$argument
+            elif [ -e "$argument" ]; then
+                error "path exists but is not a regular file: $argument"
+            else
+                payload_tmp=$(make_temp)
+                printf '%s' "$argument" >"$payload_tmp" || error "could not prepare input"
+                input=$payload_tmp
+            fi
+            ;;
+    esac
+fi
+
+case ${OSC52_MAX_BYTES-0} in
+    ''|0) ;;
+    *[!0-9]*) error "OSC52_MAX_BYTES must be a non-negative integer" ;;
+    *)
+        input_size=$(LC_ALL=C wc -c <"$input") || error "could not determine input size"
+        input_size=$(printf '%s' "$input_size" | tr -d '[:space:]')
+        [ "$input_size" -le "$OSC52_MAX_BYTES" ] || \
+            error "input is $input_size bytes; limit is $OSC52_MAX_BYTES bytes"
+        ;;
+esac
+
+# tmux can deliver the bytes through its attached client without relying on
+# escape-sequence passthrough settings. Older tmux versions may not support -w;
+# if so, fall back to emitting OSC 52 below.
+if [ -n "${TMUX-}" ] && command -v tmux >/dev/null 2>&1; then
+    if tmux load-buffer -w - <"$input" 2>/dev/null; then
+        exit 0
+    fi
+fi
+
+case ${TERM-} in
+    dumb) error "TERM=dumb does not support OSC 52" ;;
+esac
+
+command -v base64 >/dev/null 2>&1 || error "required command not found: base64"
+
+# Encode before writing any control bytes. This ensures a read or encoding
+# error cannot leave a partial OSC command in the terminal's input stream.
+base64_tmp=$(make_temp)
+encoded_tmp=$(make_temp)
+if ! base64 <"$input" >"$base64_tmp"; then
+    error "could not base64-encode the input"
+fi
+if ! LC_ALL=C tr -d '\r\n' <"$base64_tmp" >"$encoded_tmp"; then
+    error "could not normalize the base64 output"
+fi
+
+# Prefer the controlling terminal: stdin may contain the payload and stdout may
+# be redirected. OSC52_TTY=- is useful for testing or deliberate capture.
+tty_device=${OSC52_TTY-/dev/tty}
+if [ "$tty_device" = - ]; then
+    exec 3>&1
+elif [ -c "$tty_device" ] && ( : >"$tty_device" ) 2>/dev/null; then
+    exec 3>"$tty_device" || error "could not open terminal: $tty_device"
+elif [ -t 1 ]; then
+    exec 3>&1
+else
+    error "no writable controlling terminal; OSC 52 cannot be delivered"
+fi
+
+if [ -n "${STY-}" ]; then
+    # GNU Screen passes DCS payloads to the outer terminal. Splitting every 76
+    # bytes avoids Screen's control-string size limit.
+    command -v fold >/dev/null 2>&1 || error "required command not found: fold"
+    printf '\033P\033]52;c;' >&3
+    LC_ALL=C fold -w 76 "$encoded_tmp" | while IFS= read -r chunk || [ -n "$chunk" ]; do
+        printf '%s' "$chunk" >&3
+        printf '\033\\\033P' >&3
+    done
+    printf '\007\033\\' >&3
+else
+    printf '\033]52;c;' >&3
+    cat "$encoded_tmp" >&3 || error "could not write encoded input"
+    printf '\007' >&3
+fi

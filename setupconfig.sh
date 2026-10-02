@@ -10,15 +10,12 @@
 #   - Updates clearly marked managed blocks inside standard dotfiles
 #   - Preserves user content outside those managed blocks
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
-#   - Optionally installs universal helper scripts (currently osc52) on any
-#     supported shell platform, and Linux x64-only binaries (currently fzf, bat,
-#     eza, rg, ya, yazi, zellij, and fish) only on Linux x86_64/amd64 by
-#     default. The two lists live below so future assets can be classified in
-#     one obvious place. Missing tools are downloaded into ~/.local/bin from
-#     this repo's latest release assets when compatible or explicitly forced;
-#     the folder is created if needed, and it is added to PATH in ~/.profile
-#     when that file already exists (custom-patched builds like zellij then win
-#     over distros).
+#   - Synchronizes the portable scripts under scripts/ on every run.
+#   - Optionally installs or updates compiled tools from each provider's latest
+#     stable GitHub release, using setupconfig/release-assets.tsv to select the
+#     matching OS, architecture, archive format, and member. Candidates are
+#     validated and atomically installed into ~/.local/bin; incompatible rows
+#     are skipped rather than forced onto a host.
 #   - Adds shell integration for them to the managed ~/.bashrc block when
 #     ~/.bashrc already exists: the y()
 #     yazi wrapper, the zellij z alias, fzf keybindings/completion, and
@@ -42,13 +39,13 @@
 #   ./setupconfig.sh
 #   ./setupconfig.sh --install-optional
 #   ./setupconfig.sh --install-fish
-#   ./setupconfig.sh --install-x64-binaries --install-optional
+#   ./setupconfig.sh --install-optional
 #
 #   or
-#   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --install-optional
-#   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --install-fish
-#   curl -fsSL https://raw.githubusercontent.com/tychart/LinuxStuff/main/setupconfig.sh | bash -s -- --install-x64-binaries --install-optional
+#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig.sh | bash -s -- --install-optional
+#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig.sh | bash -s -- --install-fish
+#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig.sh | bash -s -- --install-optional
 
 set -euo pipefail
 
@@ -57,6 +54,31 @@ readonly SCRIPT_TAG
 # Single source of truth for the preferred editor written into ~/.profile.
 DEFAULT_EDITOR="vim"
 readonly DEFAULT_EDITOR
+
+# Repository source configuration. Local checkouts are used directly; curl|bash
+# runs fetch supporting files from the selected GitHub ref. Keep this code Bash
+# 3.2-compatible so the same bootstrap works with macOS's system Bash.
+SETUPCONFIG_REPO="tychart/linuxstuff"
+SETUPCONFIG_REF="${SETUPCONFIG_REF:-main}"
+SETUPCONFIG_SOURCE_ROOT=''
+readonly SETUPCONFIG_REPO SETUPCONFIG_REF
+
+find_local_source_root() {
+  local script_path="${BASH_SOURCE[0]:-}"
+  local candidate
+
+  [[ -n $script_path && -f $script_path ]] || return 1
+  candidate="$(cd "$(dirname "$script_path")" 2>/dev/null && pwd -P)" || return 1
+  [[ -d $candidate/setupconfig && -d $candidate/scripts ]] || return 1
+  printf '%s' "$candidate"
+}
+
+if SETUPCONFIG_SOURCE_ROOT="$(find_local_source_root)"; then
+  readonly SETUPCONFIG_SOURCE_ROOT
+else
+  SETUPCONFIG_SOURCE_ROOT=''
+  readonly SETUPCONFIG_SOURCE_ROOT
+fi
 
 require_supported_bash() {
   # macOS still ships Bash 3.2.x by default. Keep this script compatible with
@@ -83,16 +105,11 @@ OSCYANK_FILE="$VIM_PLUGIN_DIR/oscyank.vim"
 readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE ZSHRC_FILE VIMRC_FILE INPUTRC_FILE FISH_CONFIG_FILE
 readonly VIM_DIR VIM_PLUGIN_DIR VIM_UNDO_DIR OSCYANK_FILE
 
-# When set (--install-optional / --install-fish), compatible missing optional
-# assets are installed without prompting, even when the script runs without a
-# TTY. Linux x64-only assets still stay gated unless the platform matches or
-# --install-x64-binaries is passed.
+# Optional compiled assets are installed/updated without prompting when
+# --install-optional is supplied. The manifest always enforces OS and
+# architecture matching; incompatible binaries are never forced onto a host.
 INSTALL_NICE_TO_HAVES=0
 INSTALL_FISH=0
-# Safety valve for unsupported systems: by default repo-provided compiled
-# binaries are offered only on Linux x86_64/amd64. Set by
-# --install-x64-binaries when the user intentionally wants to force them.
-INSTALL_X64_REPO_BINARIES=0
 
 # Remove temporary files on exit, including when set -e aborts mid-run.
 TEMP_FILES=()
@@ -106,6 +123,64 @@ cleanup_temp_files() {
 trap cleanup_temp_files EXIT
 register_temp_file() {
   TEMP_FILES[${#TEMP_FILES[@]}]="$1"
+}
+
+validate_repo_relative_path() {
+  local path="$1"
+
+  [[ -n $path && $path != /* && $path != *'..'* ]] || return 1
+  case "$path" in
+    *[!A-Za-z0-9._/+@-]*) return 1 ;;
+  esac
+}
+
+fetch_repo_file() {
+  local remote_path="$1"
+  local destination="$2"
+  local url
+
+  validate_repo_relative_path "$remote_path" || {
+    printf '[setup] Invalid repository-relative path: %s\n' "$remote_path" >&2
+    return 1
+  }
+
+  if [[ -n $SETUPCONFIG_SOURCE_ROOT && -f $SETUPCONFIG_SOURCE_ROOT/$remote_path ]]; then
+    cp "$SETUPCONFIG_SOURCE_ROOT/$remote_path" "$destination"
+    return 0
+  fi
+
+  command -v curl >/dev/null 2>&1 || {
+    printf '[setup] curl is required to fetch %s from %s\n' "$remote_path" "$SETUPCONFIG_REPO" >&2
+    return 1
+  }
+
+  case "$SETUPCONFIG_REF" in
+    ''|*[!A-Za-z0-9._/+@-]*)
+      printf '[setup] Invalid SETUPCONFIG_REF: %s\n' "$SETUPCONFIG_REF" >&2
+      return 1
+      ;;
+  esac
+
+  url="https://raw.githubusercontent.com/${SETUPCONFIG_REPO}/${SETUPCONFIG_REF}/${remote_path}"
+  curl -fL --retry 3 --max-time 30 -sS -o "$destination" "$url"
+}
+
+load_repo_content() {
+  local var_name="$1"
+  local remote_path="$2"
+  local tmp
+
+  tmp="$(mktemp)"
+  register_temp_file "$tmp"
+  if ! fetch_repo_file "$remote_path" "$tmp"; then
+    printf '[setup] Could not load required setup source: %s\n' "$remote_path" >&2
+    return 1
+  fi
+  [[ -s $tmp ]] || {
+    printf '[setup] Required setup source is empty: %s\n' "$remote_path" >&2
+    return 1
+  }
+  read_content "$var_name" <"$tmp"
 }
 
 read_content() {
@@ -136,17 +211,15 @@ Usage:
   ./setupconfig.sh
   ./setupconfig.sh --install-optional
   ./setupconfig.sh --install-fish
-  ./setupconfig.sh --install-x64-binaries --install-optional
+  ./setupconfig.sh --install-optional
 
-  --install-optional   install compatible missing optional assets without
-                       prompting: universal helper scripts everywhere, plus
-                       Linux x64 binaries on Linux x86_64/amd64 only
-  --install-fish       install fish from this repo's Linux x64 release asset
-                       into ~/.local/bin without prompting when compatible
+  --install-optional   install/update manifest-selected compiled assets
+                       without prompting; only matching OS/architectures run
+  --install-fish       install/update fish from the matching release asset
+                       into ~/.local/bin without prompting
   --install-x64-binaries
-                       force offering/installing this repo's Linux x64 binary
-                       assets on the current machine; use only when you know
-                       they are compatible
+                       deprecated compatibility alias for --install-optional;
+                       architecture matching is still enforced
 EOF
 }
 
@@ -162,7 +235,7 @@ parse_args() {
         shift
         ;;
       --install-x64-binaries)
-        INSTALL_X64_REPO_BINARIES=1
+        INSTALL_NICE_TO_HAVES=1
         shift
         ;;
       -h|--help)
@@ -412,32 +485,14 @@ ensure_dependencies() {
 # ---------------------------------------------------------------------------
 # Optional assets
 #
-# These ship as release assets of this GitHub repo and are installed to
-# ~/.local/bin, the conventional user-local executable location on modern
-# Linux systems. Keep architecture-specific and architecture-agnostic assets
-# separate so macOS, Raspberry Pi OS, Termux, and other ARM/non-Linux users can
-# safely take the portable shell/Vim/Fish config without receiving incompatible
-# Linux x64 binaries.
+# Compiled tools are installed from their upstream GitHub releases according to
+# setupconfig/release-assets.tsv. The portable osc52 helper is synchronized by
+# the managed-script section below on every run and is not optional.
 # ---------------------------------------------------------------------------
 
-NICE_TO_HAVE_REPO="tychart/linuxstuff"
-# Used only when the GitHub API cannot be reached to resolve the latest tag.
-NICE_TO_HAVE_FALLBACK_TAG="v1.0.0"
 NICE_TO_HAVE_BIN_DIR="$HOME/.local/bin"
-# Names here are both the release asset names and the installed executable
-# names. Add future repo assets to exactly one list:
-#   - UNIVERSAL: scripts or other architecture-agnostic executables
-#   - X64: Linux x86_64/amd64 compiled binaries
-NICE_TO_HAVE_UNIVERSAL_TOOLS=(osc52)
-NICE_TO_HAVE_X64_TOOLS=(fzf bat eza rg ya yazi zellij)
-FISH_X64_TOOLS=(fish)
-readonly NICE_TO_HAVE_REPO NICE_TO_HAVE_FALLBACK_TAG NICE_TO_HAVE_BIN_DIR
-readonly NICE_TO_HAVE_UNIVERSAL_TOOLS NICE_TO_HAVE_X64_TOOLS FISH_X64_TOOLS
+readonly NICE_TO_HAVE_BIN_DIR
 
-# Cheap release-asset checks that need no extra tools: compiled binaries start
-# with the 4 magic bytes 0x7f 'E' 'L' 'F', while shell-script executables like
-# osc52 start with a shebang. Catches HTML error pages and truncated or corrupt
-# downloads without requiring the file command.
 is_elf_binary() {
   local magic
   magic="$(head -c 4 "$1" 2>/dev/null)"
@@ -450,203 +505,327 @@ is_shebang_script() {
   [[ "$magic" == '#!' ]]
 }
 
-is_valid_release_executable() {
-  is_elf_binary "$1" || is_shebang_script "$1"
-}
+# ---------------------------------------------------------------------------
+# Managed portable scripts and third-party GitHub release assets
+#
+# Portable scripts are fetched from this repository and synchronized on every
+# setup run. Compiled tools come from their upstream GitHub releases, selected
+# by the manifest in setupconfig/release-assets.tsv. A per-tool state file
+# avoids downloading a release again when neither its tag nor manifest row
+# changed.
+# ---------------------------------------------------------------------------
 
-# Resolve the newest release tag via the GitHub API.  Callers that only need
-# a best-effort install can use the fallback wrapper below; callers deciding
-# whether to replace an existing installation must not guess a release tag.
-fetch_current_release_tag() {
-  local api_url="https://api.github.com/repos/${NICE_TO_HAVE_REPO}/releases/latest"
-  local tag
+NICE_TO_HAVE_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/setupconfig/releases"
+GITHUB_TAG_CACHE=''
 
-  tag="$(curl -fsSL --max-time 20 "$api_url" 2>/dev/null | LC_ALL=C sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)" || return 1
-  [[ -n $tag ]] || return 1
-  printf '%s' "$tag"
-}
-
-# The standalone binary installer can safely try its known initial release
-# when GitHub's API is temporarily unavailable.
-fetch_latest_release_tag() {
-  if fetch_current_release_tag; then
-    return 0
-  fi
-
-  # Warn on stderr so the message is not captured by callers using command
-  # substitution (e.g. tag="$(fetch_latest_release_tag)").
-  printf '[setup] Could not query GitHub API for the latest %s release; falling back to %s\n' "$NICE_TO_HAVE_REPO" "$NICE_TO_HAVE_FALLBACK_TAG" >&2
-  printf '%s' "$NICE_TO_HAVE_FALLBACK_TAG"
-}
-
-lowercase() {
-  # Avoid Bash 4-only case-conversion expansion so the installer can still
-  # run under macOS's older system Bash.
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
-}
-
-detected_platform() {
-  printf '%s/%s' "$(uname -s 2>/dev/null || printf unknown)" "$(uname -m 2>/dev/null || printf unknown)"
-}
-
-is_linux_x64() {
-  local os arch
-
-  os="$(uname -s 2>/dev/null || printf unknown)"
-  arch="$(uname -m 2>/dev/null || printf unknown)"
-
-  case "$os:$arch" in
-    Linux:x86_64|Linux:amd64) return 0 ;;
+is_macho_binary() {
+  local magic
+  magic="$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d '[:space:]')"
+  case "$magic" in
+    cffaedfe|feedfacf|cafebabe|cefaedfe|feedface|cafebabf) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-can_offer_linux_x64_assets() {
-  is_linux_x64 || [[ $INSTALL_X64_REPO_BINARIES == 1 ]]
+is_valid_release_executable() {
+  is_elf_binary "$1" || is_macho_binary "$1" || is_shebang_script "$1"
 }
 
-log_skipped_linux_x64_assets() {
-  local label="$1"
-  shift
-
-  log "Skipping ${label}: repo assets are Linux x64-only; detected $(detected_platform)."
-  log "Install these tools with your platform package manager instead when available: $*"
-  log "If you intentionally want to force this repo's Linux x64 assets, re-run with --install-x64-binaries."
+normalize_arch() {
+  case "$1" in
+    x86_64|amd64) printf 'x86_64' ;;
+    aarch64|arm64) printf 'aarch64' ;;
+    armv7*|arm) printf 'armv7' ;;
+    *) printf '%s' "$1" ;;
+  esac
 }
 
-ensure_repo_binaries() {
-  local prompt="$1"
-  local auto_install="$2"
-  local auto_flag_name="$3"
-  local label="$4"
-  shift 4
-  local tools_ref=("$@")
-  local dir="$NICE_TO_HAVE_BIN_DIR"
-  local label_lower
-  local missing=()
-  local present=()
-  local tool
+platform_os() {
+  uname -s 2>/dev/null || printf unknown
+}
+
+platform_arch() {
+  normalize_arch "$(uname -m 2>/dev/null || printf unknown)"
+}
+
+release_tag_for_repo() {
+  local repository="$1"
+  local api_url="https://api.github.com/repos/${repository}/releases/latest"
   local tag
-  local url
-  local dest
+  local response
+
+  if [[ -n $GITHUB_TAG_CACHE && -f $GITHUB_TAG_CACHE ]]; then
+    tag="$(awk -F '\t' -v repo="$repository" '$1 == repo { print $2; exit }' "$GITHUB_TAG_CACHE")"
+    if [[ -n $tag ]]; then
+      printf '%s' "$tag"
+      return 0
+    fi
+  fi
+
+  response="$(mktemp)"
+  register_temp_file "$response"
+  if ! curl -fsSL --retry 3 --max-time 30 -sS -o "$response" "$api_url"; then
+    rm -f "$response"
+    return 1
+  fi
+
+  tag="$(awk -F '"' '/"tag_name"/ { print $4; exit }' "$response")"
+  rm -f "$response"
+  case "$tag" in
+    ''|*[!A-Za-z0-9._/@+-]*) return 1 ;;
+  esac
+
+  if [[ -n $GITHUB_TAG_CACHE ]]; then
+    printf '%s\t%s\n' "$repository" "$tag" >> "$GITHUB_TAG_CACHE"
+  fi
+  printf '%s' "$tag"
+}
+
+manifest_value() {
+  local value="$1"
+  local tag="$2"
+  local arch="$3"
+  local version="${tag#v}"
+
+  value="${value//\{tag\}/$tag}"
+  value="${value//\{version\}/$version}"
+  value="${value//\{arch\}/$arch}"
+  printf '%s' "$value"
+}
+
+validate_archive_member() {
+  local member="$1"
+
+  [[ -n $member && $member != /* && $member != *'..'* ]] || return 1
+  case "$member" in
+    *[!A-Za-z0-9._/+@-]*) return 1 ;;
+  esac
+}
+
+extract_release_member() {
+  local archive="$1"
+  local format="$2"
+  local member="$3"
+  local destination="$4"
+
+  if [[ $format == raw ]]; then
+    cp "$archive" "$destination"
+    return $?
+  fi
+
+  validate_archive_member "$member" || {
+    log "Unsafe archive member '$member'; refusing to extract it"
+    return 1
+  }
+
+  case "$format" in
+    tar)
+      tar -tf "$archive" 2>/dev/null | grep -F -x "$member" >/dev/null 2>&1 || {
+        log "Archive does not contain exact member '$member'"
+        return 1
+      }
+      tar -xOf "$archive" "$member" > "$destination"
+      ;;
+    zip)
+      command -v unzip >/dev/null 2>&1 || {
+        log "unzip is required for archive member '$member'; skipping"
+        return 1
+      }
+      unzip -p "$archive" "$member" > "$destination"
+      ;;
+    *)
+      log "Unsupported release format '$format'"
+      return 1
+      ;;
+  esac
+}
+
+install_repo_executable() {
+  local remote_path="$1"
+  local destination="$2"
+  local label="$3"
+  local dir
   local tmp
   local version
 
-  label_lower="$(lowercase "$label")"
+  dir="$(dirname "$destination")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.${label}.part.XXXXXX")"
+  register_temp_file "$tmp"
 
-  if [[ ${#tools_ref[@]} -eq 0 ]]; then
+  if ! fetch_repo_file "$remote_path" "$tmp"; then
+    rm -f "$tmp"
+    log "Failed to fetch managed executable '$label'; leaving any existing installation untouched"
+    return 0
+  fi
+  if ! is_shebang_script "$tmp"; then
+    rm -f "$tmp"
+    log "Managed executable '$label' has no shebang; not installing"
     return 0
   fi
 
-  if [[ ! -d $dir ]]; then
-    mkdir -p "$dir"
-    log "Created $dir (optional binaries will be installed here)"
-  fi
-
-  shopt -s nullglob
-  rm -f "$dir"/.*.part.*
-  shopt -u nullglob
-
-  for tool in "${tools_ref[@]}"; do
-    dest="$dir/$tool"
-    if [[ -s $dest ]] && is_valid_release_executable "$dest"; then
-      chmod +x "$dest" 2>/dev/null || true
-      log "${label} '$tool' already installed ($dest)"
-    else
-      if [[ -e $dest ]]; then
-        log "${label} '$tool' exists at $dest but is empty or not a valid release executable; re-downloading"
-      fi
-      missing[${#missing[@]}]="$tool"
-    fi
-  done
-
-  if [[ ${#missing[@]} -eq 0 ]]; then
-    log "All ${label_lower} present in $dir"
+  chmod 755 "$tmp"
+  if ! version="$("$tmp" --version 2>/dev/null | head -n 1)" || [[ -z $version ]]; then
+    rm -f "$tmp"
+    log "Managed executable '$label' failed its --version smoke test; not installing"
     return 0
   fi
 
-  if ! command -v curl >/dev/null 2>&1; then
-    log "curl is required to install missing ${label_lower} (${missing[*]}); skipping"
+  if [[ -f $destination ]] && cmp -s "$destination" "$tmp"; then
+    rm -f "$tmp"
+    chmod 755 "$destination" 2>/dev/null || true
+    log "Managed executable '$label' unchanged ($destination)"
     return 0
   fi
 
-  log "Missing ${label_lower} from $dir: ${missing[*]}"
-
-  if [[ $auto_install != 1 ]] && ! confirm_prompt "$prompt"; then
-    log "Skipping ${label_lower} installation."
-    log "Re-run with ${auto_flag_name} to install without prompting (also works in cron/CI)."
-    return 0
-  fi
-
-  tag="$(fetch_latest_release_tag)"
-  log "Installing ${label_lower} from release ${tag}"
-
-  for tool in "${missing[@]}"; do
-    dest="$dir/$tool"
-    tmp="$(mktemp "${dir}/.${tool}.part.XXXXXX")"
-    register_temp_file "$tmp"
-    url="https://github.com/${NICE_TO_HAVE_REPO}/releases/download/${tag}/${tool}"
-
-    if ! curl -fL --retry 3 --progress-bar -o "$tmp" "$url"; then
-      rm -f "$tmp"
-      log "Failed to download ${tool} from ${url}"
-      continue
-    fi
-
-    if ! is_valid_release_executable "$tmp"; then
-      rm -f "$tmp"
-      log "Downloaded ${tool} is not a valid release executable (from ${url}); not installing"
-      continue
-    fi
-
-    chmod 755 "$tmp"
-    mv -f "$tmp" "$dest"
-    log "Installed ${tool} -> ${dest} (release ${tag})"
-
-    if version="$("$dest" --version 2>/dev/null | head -n 1)" && [[ -n $version ]]; then
-      log "  ${tool} version: ${version}"
-    else
-      log "  Warning: ${tool} installed but its --version smoke test failed"
-    fi
-  done
-
-  for tool in "${tools_ref[@]}"; do
-    [[ -x $dir/$tool ]] && present[${#present[@]}]="$tool"
-  done
-  log "${label} present in ${dir}: ${present[*]:-none}"
+  mv -f "$tmp" "$destination"
+  version="$($destination --version 2>/dev/null | head -n 1)"
+  log "Installed managed executable '$label' -> $destination ($version)"
 }
 
-ensure_nice_to_haves() {
-  ensure_repo_binaries \
-    "Download and install missing universal helper scripts (${NICE_TO_HAVE_UNIVERSAL_TOOLS[*]})?" \
-    "$INSTALL_NICE_TO_HAVES" \
-    "--install-optional" \
-    "Universal helper scripts" \
-    "${NICE_TO_HAVE_UNIVERSAL_TOOLS[@]}"
+install_github_manifest_tool() {
+  local tool="$1"
+  local manifest_file="$2"
+  local target_os="$3"
+  local target_arch="$4"
+  local auto_install="$5"
+  local tool_label="$6"
+  local row_tool row_repo row_os row_arch row_asset row_format row_member row_version_arg
+  local tag asset member state_file expected_state current_state url
+  local destination="$NICE_TO_HAVE_BIN_DIR/$tool"
+  local asset_tmp candidate state_tmp version
+  local found=0
 
-  if can_offer_linux_x64_assets; then
-    ensure_repo_binaries \
-      "Download and install missing Linux x64 nice-to-have binaries (${NICE_TO_HAVE_X64_TOOLS[*]})?" \
-      "$INSTALL_NICE_TO_HAVES" \
-      "--install-optional" \
-      "Linux x64 nice-to-have binaries" \
-      "${NICE_TO_HAVE_X64_TOOLS[@]}"
-  else
-    log_skipped_linux_x64_assets "Linux x64 nice-to-have binaries" "${NICE_TO_HAVE_X64_TOOLS[@]}"
+  while IFS="$(printf '\t')" read -r row_tool row_repo row_os row_arch row_asset row_format row_member row_version_arg; do
+    [[ -z $row_tool || ${row_tool#\#} != "$row_tool" ]] && continue
+    [[ $row_tool == "$tool" && $row_os == "$target_os" && $row_arch == "$target_arch" ]] || continue
+    found=1
+
+    state_file="$NICE_TO_HAVE_STATE_DIR/$tool"
+    current_state=''
+    [[ -f $state_file ]] && current_state="$(cat "$state_file")"
+    tag=''
+
+    # Do not make release API calls for missing optional tools until the user
+    # opts in. Existing managed tools do need a tag lookup so updates can be
+    # detected; a missing state file is treated as a one-time migration.
+    if [[ -x $destination ]] && is_valid_release_executable "$destination" &&
+       [[ -n $current_state ]]; then
+      if ! tag="$(release_tag_for_repo "$row_repo")"; then
+        log "Could not resolve the latest GitHub release for $row_repo; leaving $destination unchanged"
+        return 0
+      fi
+      expected_state="$tag$(printf '\t')$row_tool$(printf '\t')$row_repo$(printf '\t')$row_os$(printf '\t')$row_arch$(printf '\t')$row_asset$(printf '\t')$row_format$(printf '\t')$row_member"
+      if [[ "$current_state" == "$expected_state" ]]; then
+        log "$tool is current ($destination, release $tag)"
+        return 0
+      fi
+    elif [[ $auto_install != 1 ]]; then
+      if [[ -e $destination ]]; then
+        log "$tool needs a managed update or state migration ($destination)"
+      else
+        log "$tool is not installed ($destination)"
+      fi
+      if ! confirm_prompt "Download/install the latest ${tool_label} '$tool' from ${row_repo}?"; then
+        log "Skipping $tool. Re-run with --install-optional to install/update without prompting."
+        return 0
+      fi
+    fi
+
+    if [[ -z $tag ]] && ! tag="$(release_tag_for_repo "$row_repo")"; then
+      log "Could not resolve the latest GitHub release for $row_repo; leaving $destination unchanged"
+      return 0
+    fi
+    asset="$(manifest_value "$row_asset" "$tag" "$target_arch")"
+    member="$(manifest_value "$row_member" "$tag" "$target_arch")"
+    expected_state="$tag$(printf '\t')$row_tool$(printf '\t')$row_repo$(printf '\t')$row_os$(printf '\t')$row_arch$(printf '\t')$row_asset$(printf '\t')$row_format$(printf '\t')$row_member"
+
+    if [[ $auto_install != 1 && -x $destination && -n $current_state ]]; then
+      if ! confirm_prompt "Update ${tool_label} '$tool' to GitHub release ${tag}?"; then
+        log "Skipping $tool. Re-run with --install-optional to update without prompting."
+        return 0
+      fi
+    fi
+
+    mkdir -p "$NICE_TO_HAVE_BIN_DIR" "$NICE_TO_HAVE_STATE_DIR"
+    asset_tmp="$(mktemp "$NICE_TO_HAVE_BIN_DIR/.${tool}.asset.XXXXXX")"
+    candidate="$(mktemp "$NICE_TO_HAVE_BIN_DIR/.${tool}.candidate.XXXXXX")"
+    register_temp_file "$asset_tmp"
+    register_temp_file "$candidate"
+    url="https://github.com/${row_repo}/releases/download/${tag}/${asset}"
+
+    if ! curl -fL --retry 3 --max-time 120 -sS -o "$asset_tmp" "$url"; then
+      rm -f "$asset_tmp" "$candidate"
+      log "Failed to download $tool from $url; leaving the existing executable untouched"
+      return 0
+    fi
+    if ! extract_release_member "$asset_tmp" "$row_format" "$member" "$candidate" ||
+       [[ ! -s $candidate ]] || ! is_valid_release_executable "$candidate"; then
+      rm -f "$asset_tmp" "$candidate"
+      log "Downloaded $tool did not contain a valid executable; leaving the existing executable untouched"
+      return 0
+    fi
+
+    chmod 755 "$candidate"
+    if ! version="$("$candidate" "$row_version_arg" 2>/dev/null | head -n 1)" || [[ -z $version ]]; then
+      rm -f "$asset_tmp" "$candidate"
+      log "Downloaded $tool failed its $row_version_arg smoke test; leaving the existing executable untouched"
+      return 0
+    fi
+
+    mv -f "$candidate" "$destination"
+    rm -f "$asset_tmp"
+    state_tmp="$(mktemp "$NICE_TO_HAVE_STATE_DIR/.${tool}.state.XXXXXX")"
+    register_temp_file "$state_tmp"
+    printf '%s\n' "$expected_state" > "$state_tmp"
+    chmod 600 "$state_tmp"
+    mv -f "$state_tmp" "$state_file"
+    log "Installed/updated $tool -> $destination ($version; release $tag)"
+    return 0
+  done < "$manifest_file"
+
+  [[ $found -eq 1 ]] || log "No GitHub release asset is configured for $tool on ${target_os}/${target_arch}; skipping"
+}
+
+ensure_manifest_tools() {
+  local auto_install="$1"
+  shift
+  local manifest_file
+  local os arch tool
+
+  command -v curl >/dev/null 2>&1 || {
+    log "curl is required for GitHub release assets; skipping compiled tools"
+    return 0
+  }
+
+  manifest_file="$(mktemp)"
+  register_temp_file "$manifest_file"
+  if ! fetch_repo_file "setupconfig/release-assets.tsv" "$manifest_file"; then
+    rm -f "$manifest_file"
+    log "Could not load the release manifest; skipping compiled tools"
+    return 0
   fi
+
+  os="$(platform_os)"
+  arch="$(platform_arch)"
+  GITHUB_TAG_CACHE="$(mktemp)"
+  register_temp_file "$GITHUB_TAG_CACHE"
+
+  for tool in "$@"; do
+    install_github_manifest_tool "$tool" "$manifest_file" "$os" "$arch" "$auto_install" "GitHub release asset"
+  done
+}
+
+# Portable scripts are not optional: they are repository-managed source and are
+# synchronized even on ARM, Darwin, Termux, and unsupported platforms.
+ensure_nice_to_haves() {
+  install_repo_executable "scripts/osc52" "$NICE_TO_HAVE_BIN_DIR/osc52" "osc52"
+  ensure_manifest_tools "$INSTALL_NICE_TO_HAVES" fzf bat eza rg ya yazi zellij
 }
 
 ensure_fish() {
-  if can_offer_linux_x64_assets; then
-    ensure_repo_binaries \
-      "Download and install fish from this repo's Linux x64 release asset?" \
-      "$INSTALL_FISH" \
-      "--install-fish" \
-      "Fish Linux x64 binary" \
-      "${FISH_X64_TOOLS[@]}"
-  else
-    log_skipped_linux_x64_assets "fish binary" "${FISH_X64_TOOLS[@]}"
-  fi
+  [[ $INSTALL_FISH == 1 ]] || return 0
+  ensure_manifest_tools 1 fish
 }
 
 # ---------------------------------------------------------------------------
@@ -661,12 +840,6 @@ ensure_fish() {
 # are intentionally left in place so the previous whole-file config can be
 # restored manually if needed.
 # ---------------------------------------------------------------------------
-
-# Raw-file base for configs on the default branch. Uses the canonical
-# raw.githubusercontent.com endpoint (one hop instead of github.com's
-# redirect to raw). The repo path is case-insensitive on GitHub.
-CONFIG_SOURCE_URL_BASE="https://raw.githubusercontent.com/tychart/linuxstuff/main"
-readonly CONFIG_SOURCE_URL_BASE
 
 # Yazi flavor referenced by the managed theme.toml ([flavor] dark =
 # "tokyo-night"). The flavor is a ya package, not part of this repo, so it is
@@ -708,14 +881,12 @@ install_one_config() {
   local dest="$3"
   local dir
   local tmp
-  local url
 
   if ! tool_is_present "$tool"; then
     log "Skipping ${tool} config (${dest}): ${tool} binary not installed"
     return 0
   fi
 
-  url="${CONFIG_SOURCE_URL_BASE}/${remote_path}"
   dir="$(dirname "$dest")"
   mkdir -p "$dir"
 
@@ -727,15 +898,15 @@ install_one_config() {
   tmp="$(mktemp "$dir/.${tool}.config.part.XXXXXX")"
   register_temp_file "$tmp"
 
-  if ! curl -fL --retry 3 -sS -o "$tmp" "$url"; then
+  if ! fetch_repo_file "$remote_path" "$tmp"; then
     rm -f "$tmp"
-    log "Failed to download ${url}; leaving any existing config untouched"
+    log "Failed to fetch managed config ${remote_path}; leaving any existing config untouched"
     return 0
   fi
 
   if [[ ! -s $tmp ]]; then
     rm -f "$tmp"
-    log "Downloaded ${url} is empty; not installing"
+    log "Managed config ${remote_path} is empty; not installing"
     return 0
   fi
 
@@ -743,7 +914,7 @@ install_one_config() {
   # these config formats starts with '<'.
   if [[ $(head -c 1 "$tmp") == '<' ]]; then
     rm -f "$tmp"
-    log "Downloaded ${url} looks like an HTML error page; not installing"
+    log "Managed config ${remote_path} looks like an HTML error page; not installing"
     return 0
   fi
 
@@ -813,11 +984,6 @@ ensure_tokyo_night_flavor() {
 install_tool_configs() {
   local config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
 
-  if ! command -v curl >/dev/null 2>&1; then
-    log "curl not found; skipping yazi/zellij config installation"
-    return 0
-  fi
-
   install_one_config yazi yazi/yazi.toml "$config_root/yazi/yazi.toml"
   install_one_config yazi yazi/theme.toml "$config_root/yazi/theme.toml"
   install_one_config zellij zellij/config.kdl "$config_root/zellij/config.kdl"
@@ -881,937 +1047,27 @@ else
   log "No known system Bash rc for this OS; leaving any existing ~/.bashrc fully self-managed"
 fi
 
-read_content PROFILE_CONTENT <<'EOF'
-# Login shells read ~/.profile first, then pull in ~/.bashrc for interactive extras.
-# The guard avoids an infinite loop when ~/.bashrc later sources ~/.profile.
-# Use expr instead of a case statement here to keep this block friendly to
-# older/vendor shells that may read ~/.profile.
-if [ -n "${BASH_VERSION:-}" ] && [ -r "$HOME/.bashrc" ] && [ -z "${__SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC:-}" ] && expr "x$-" : 'x.*i' >/dev/null 2>&1; then
-  . "$HOME/.bashrc"
-fi
-
-# Prefer user-local bin directories when they exist. Add them first, then
-# dedupe once below so rerunning/sourceing this block does not grow PATH.
-[ -d "$HOME/bin" ] && PATH="$HOME/bin:$PATH"
-[ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH"
-
-# Bun: configure it only when installed so shells that do not use Bun pay
-# almost no startup cost.
-if [ -d "$HOME/.bun" ]; then
-  export BUN_INSTALL="$HOME/.bun"
-  [ -d "$BUN_INSTALL/bin" ] && PATH="$BUN_INSTALL/bin:$PATH"
-fi
-
-# Collapse duplicate entries while keeping the first occurrence, so the
-# precedence above is preserved. Written without Bash-only locals so this
-# block stays safe in ~/.profile on macOS/vendor shells.
-__setupconfig_dedupe_path() {
-  result=''
-  old_ifs=$IFS
-  IFS=':'
-  for entry in $PATH; do
-    [ -z "$entry" ] && continue
-    duplicate=0
-    for existing in $result; do
-      if [ "$existing" = "$entry" ]; then
-        duplicate=1
-        break
-      fi
-    done
-    [ "$duplicate" -eq 0 ] && result="${result:+$result:}$entry"
-  done
-  IFS=$old_ifs
-  printf '%s' "$result"
-}
-PATH="$(__setupconfig_dedupe_path)"
-unset -f __setupconfig_dedupe_path
-unset result entry existing duplicate old_ifs
-export PATH
-
-# Extra path aditions go here
-export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
-
-# Editor defaults live here so other tools can simply inherit them.
-export EDITOR="__DEFAULT_EDITOR__"
-export VISUAL="__DEFAULT_EDITOR__"
-export SYSTEMD_EDITOR="__DEFAULT_EDITOR__"
-export INPUTRC="${INPUTRC:-$HOME/.inputrc}"
-EOF
+load_repo_content PROFILE_CONTENT "setupconfig/managed/profile.sh"
 PROFILE_CONTENT="${PROFILE_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 
-read_content BASH_PROFILE_CONTENT <<'EOF'
-# Ensure Bash login shells also load ~/.profile.
-if [ -r "$HOME/.profile" ]; then
-  . "$HOME/.profile"
-fi
-EOF
+load_repo_content BASH_PROFILE_CONTENT "setupconfig/managed/bash_profile.sh"
 
-read_content ZSHRC_CONTENT <<'EOF'
-# Prefer Fish for interactive Zsh work when it is installed.
-# This stays tiny on purpose: the full shell setup lives in Fish/Bash config,
-# and missing Fish should never break Zsh startup.
-if [[ -o interactive ]] && [[ -z "${FISH_VERSION:-}" ]] && command -v fish >/dev/null 2>&1; then
-  exec "$(command -v fish)"
-fi
-EOF
+load_repo_content ZSHRC_CONTENT "setupconfig/managed/zshrc.sh"
 
-read_content BASHRC_CONTENT <<'EOF'
-# Editor defaults should exist before any early return so child CLI tools inherit them.
-export EDITOR="${EDITOR:-__DEFAULT_EDITOR__}"
-export VISUAL="${VISUAL:-$EDITOR}"
-
-# Stop here for non-interactive shells.
-[[ $- == *i* ]] || return
-
-# ~/.profile sources this file back, both in its managed block and in
-# preserved user content. If we are already inside such a source, stop:
-# everything below was already defined by the outer pass. Without this the
-# two files would source each other forever and every shell would hang.
-if [ -n "${__SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
-  return
-fi
-
-__SYSTEM_BASHRC_BLOCK__
-# Many terminals start Bash as a non-login shell, which skips ~/.profile.
-# Source it here so PATH and editor defaults are consistent in every shell.
-# The guard prevents recursion because ~/.profile sources this file back.
-if [ -r "$HOME/.profile" ]; then
-  __SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC=1
-  . "$HOME/.profile"
-  unset __SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC
-fi
-
-# Prefer Fish for interactive work when it is installed.
-if [ -z "${FISH_VERSION:-}" ] && command -v fish >/dev/null 2>&1; then
-  exec "$(command -v fish)"
-fi
-
-export INPUTRC="${INPUTRC:-$HOME/.inputrc}"
-
-# History behavior.
-HISTCONTROL=ignoredups:erasedups
-HISTSIZE=50000
-HISTFILESIZE=100000
-HISTTIMEFORMAT="%d/%m/%y %T "
-shopt -s histappend
-shopt -s checkwinsize
-
-__setupconfig_history_sync() {
-  # Append this shell's new history lines, then pull in lines from other shells.
-  history -a
-  history -n
-}
-
-if expr "x;${PROMPT_COMMAND:-};" : 'x.*;__setupconfig_history_sync;.*' >/dev/null 2>&1; then
-  :
-elif [ -z "${PROMPT_COMMAND:-}" ]; then
-  PROMPT_COMMAND="__setupconfig_history_sync"
-else
-  PROMPT_COMMAND="__setupconfig_history_sync;${PROMPT_COMMAND}"
-fi
-export PROMPT_COMMAND
-
-# Bash completion.
-if [ -r /usr/share/bash-completion/bash_completion ]; then
-  . /usr/share/bash-completion/bash_completion
-elif [ -r /etc/bash_completion ]; then
-  . /etc/bash_completion
-fi
-
-if [ -r /usr/share/bash-completion/completions/git ]; then
-  . /usr/share/bash-completion/completions/git
-elif [ -r /etc/bash_completion.d/git ]; then
-  . /etc/bash_completion.d/git
-fi
-
-# fzf integration (Ctrl-T/Ctrl-R/Alt-C keybindings and completion).
-if command -v fzf >/dev/null 2>&1; then
-  eval "$(fzf --bash)"
-fi
-
-# Tool integrations. Each optional integration is guarded so a missing
-# user-local binary never creates a broken alias or pager configuration.
-if command -v eza >/dev/null 2>&1; then
-  alias ll='eza -lag --git --icons --group-directories-first'
-else
-  # Portable fallback for systems whose ls does not support GNU color/grouping flags
-  # (macOS, Termux, BusyBox, etc.).
-  alias ll='ls -lah'
-fi
-
-if command -v bat >/dev/null 2>&1; then
-  alias b='bat'
-
-  # bat's direct man-page mode preserves groff formatting and adds readable
-  # syntax colors. Avoid pre-processing through col: it can corrupt ANSI
-  # sequences on modern man implementations.
-  if command -v man >/dev/null 2>&1; then
-    export MANPAGER='bat --plain --language=man'
-  fi
-fi
-
-# Aliases.
-alias ..='cd ..'
-alias ...='cd ../..'
-alias ....='cd ../../..'
-alias .....='cd ../../../..'
-alias c='clear'
-alias k='kubectl'
-alias myip='hostname -I 2>/dev/null | awk "{print \$1}"'
-alias src='source "$HOME/.profile"'
-alias venv='source .venv/bin/activate'
-alias ver='cat /etc/*-release'
-alias vim='vim -u "$HOME/.vimrc"'
-alias whoson='last -w | tac'
-alias details='get_machine_info'
-if command -v zellij >/dev/null 2>&1; then
-  alias z='zellij attach -c main'
-fi
-
-# Functions.
-mmkdir() {
-  if [ $# -ne 1 ]; then
-    printf 'usage: mmkdir <dir>\n' >&2
-    return 1
-  fi
-
-  command mkdir -p "$1" && cd -- "$1"
-}
-
-get_machine_info() {
-  local distro version_id os ver name ip
-
-  if [ -r /etc/os-release ]; then
-    . /etc/os-release
-    distro="$ID"
-    version_id="$VERSION_ID"
-  else
-    distro="unknown"
-    version_id="unknown"
-  fi
-
-  if [ "$distro" = "ubuntu" ]; then
-    os="ubu"
-  else
-    os="$distro"
-  fi
-
-  ver="${os}${version_id}"
-  name="$(hostname)"
-  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  if [ -z "$ip" ]; then
-    ip="$(hostname -i 2>/dev/null || true)"
-  fi
-
-  printf '******************************\n'
-  printf 'Hostname: %s\n' "$name"
-  printf 'IP address: %s\n' "$ip"
-  printf 'Operating system: %s\n' "$ver"
-  printf '******************************\n'
-}
-
-get_os_short() {
-  if [ -r /etc/os-release ]; then
-    . /etc/os-release
-    printf '%s%s' "$ID" "$VERSION_ID"
-  else
-    printf 'unknown'
-  fi
-}
-
-ssu() {
-  # Preserve your HOME and rc setup when opening a root shell.
-  sudo --preserve-env=HOME env HOME="$HOME" bash --rcfile "$HOME/.bashrc" -i
-}
-
-y() {
-  # Open yazi and change to the directory it left us in on exit.
-  if ! command -v yazi >/dev/null 2>&1; then
-    printf 'y: yazi is not installed; install it with your system package manager or this setup script on Linux x64.\n' >&2
-    return 127
-  fi
-
-  local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
-  command yazi "$@" --cwd-file="$tmp"
-  IFS= read -r -d '' cwd < "$tmp"
-  [ "$cwd" != "$PWD" ] && [ -d "$cwd" ] && builtin cd -- "$cwd"
-  command rm -f "$tmp"
-}
-
-
-if ! command -v osc52 >/dev/null 2>&1; then
-  osc52() {
-      local data
-
-      if [ $# -gt 0 ]; then
-          data="$*"
-      else
-          data="$(cat)"
-      fi
-
-      local encoded
-
-      if base64 --wrap=0 </dev/null >/dev/null 2>&1; then
-          encoded="$(printf '%s' "$data" | base64 --wrap=0)"
-      else
-          encoded="$(printf '%s' "$data" | base64 | tr -d '\n')"
-      fi
-
-      printf '\033]52;c;%s\a' "$encoded"
-  }
-fi
-
-# Prompt.
-# NOTE: You mentioned you may replace this later with Starship.
-# This section is intentionally isolated so it is easy to remove/swap.
-__setupconfig_set_prompt() {
-  if [ "$TERM" = "xterm-color" ]; then
-    PS1='\u@\h \w $ '
-    return
-  fi
-
-  if [ "$EUID" -ne 0 ]; then
-    PS1='\[\e[1;32m\]\u\[\e[0m\]@\[\e[0;31m\]\h\[\e[1;36m\]($(get_os_short)) \[\e[1;34m\]\w \[\e[0m\]$ '
-  else
-    PS1='\[\e[1;35m\]\u\[\e[0m\]@\[\e[0;31m\]\h\[\e[1;36m\]($(get_os_short)) \[\e[1;34m\]\w\[\e[0m\] # '
-  fi
-}
-__setupconfig_set_prompt
-export PS1
-
-# Readline quality-of-life.
-bind 'set bell-style none'
-
-# Delete backward until punctuation/whitespace instead of treating punctuation as part of a word.
-my_custom_backwards_kill_word() {
-  local line="$READLINE_LINE"
-  local pos="$READLINE_POINT"
-  local boundary_chars='[^[:alnum:]]'
-  local char
-
-  if [ "$READLINE_POINT" -eq 0 ]; then
-    return
-  fi
-
-  (( pos-- ))
-  while (( pos > 0 )); do
-    char=${line:pos-1:1}
-    if [[ $char =~ $boundary_chars ]]; then
-      break
-    fi
-    (( pos-- ))
-  done
-
-  READLINE_LINE="${line:0:pos}${line:READLINE_POINT}"
-  READLINE_POINT=$pos
-}
-
-# Ctrl+Backspace often arrives as Ctrl+H in terminals.
-bind -x '"\C-h": my_custom_backwards_kill_word'
-
-# Ctrl+W is rebound to match the custom Ctrl+Backspace behavior above.
-bind -x '"\C-w": my_custom_backwards_kill_word'
-EOF
+load_repo_content BASHRC_CONTENT "setupconfig/managed/bashrc.sh"
 BASHRC_CONTENT="${BASHRC_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 BASHRC_CONTENT="${BASHRC_CONTENT/__SYSTEM_BASHRC_BLOCK__/$SYSTEM_BASHRC_BLOCK}"
 
-read_content VIMRC_CONTENT <<'EOF'
-set nocompatible
+load_repo_content VIMRC_CONTENT "setupconfig/managed/vimrc.vim"
 
-syntax on
-if has('autocmd')
-  filetype plugin indent on
-endif
-
-" Basic editing and search defaults.
-set number
-set showcmd
-set ruler
-set wildmenu
-
-if exists('&wildmode')
-  set wildmode=longest:full,full
-endif
-
-set lazyredraw
-set showmatch
-set incsearch
-set hlsearch
-set ignorecase
-set smartcase
-set backspace=indent,eol,start
-set autoindent
-set expandtab
-set tabstop=2
-set shiftwidth=2
-
-if exists('&softtabstop')
-  set softtabstop=2
-endif
-
-set mouse=a
-set hidden
-set splitbelow
-set splitright
-set scrolloff=3
-set history=1000
-set noerrorbells
-set visualbell
-set laststatus=2
-set cursorline
-
-" Terminal cursor shapes: blinking block in Normal, blinking bar in Insert,
-" blinking underline in Replace. Terminal support may vary.
-let &t_SI = "\<Esc>[5 q"
-let &t_SR = "\<Esc>[3 q"
-let &t_EI = "\<Esc>[1 q"
-
-" Save undo history on disk so undo still works after reopening a file.
-if has('persistent_undo')
-  set undodir=~/.vim/undodir
-  set undofile
-  set undolevels=1000
-  set undoreload=10000
-endif
-
-" F6 toggles the highlighted current line. Double-Esc clears search highlighting.
-nnoremap <silent> <F6> :set cursorline!<CR>
-inoremap <silent> <F6> <C-o>:set cursorline!<CR>
-nnoremap <silent> <Esc><Esc> :nohlsearch<CR>
-
-" Use space as the leader key for custom shortcuts.
-if !exists('mapleader')
-  let mapleader = ' '
-endif
-
-" OSC 52 lets Vim copy over SSH/remote terminals without needing a local clipboard provider.
-" <leader>c copies the current motion or visual selection.
-nmap <leader>c <Plug>OSCYankOperator
-nmap <leader>cc <leader>c_
-vmap <leader>c <Plug>OSCYankVisual
-
-" Reopen files at the last cursor position from the previous edit session.
-augroup setupconfig_vim_startup
-  autocmd!
-  autocmd BufReadPost *
-    \ if line("'\"") > 0 && line("'\"") <= line('$') && &filetype !~# 'commit' |
-    \   execute 'normal! g' . nr2char(96) . '"' |
-    \ endif
-augroup END
-EOF
-
-read_content FISH_CONFIG_CONTENT <<'EOF'
-# ---------------------------------------------------------------------------
-# Environment
-# ---------------------------------------------------------------------------
-
-# Preserve inherited values when they already exist.
-if not set -q EDITOR
-    set -gx EDITOR __DEFAULT_EDITOR__
-end
-
-if not set -q VISUAL
-    set -gx VISUAL $EDITOR
-end
-
-if not set -q SYSTEMD_EDITOR
-    set -gx SYSTEMD_EDITOR $EDITOR
-end
-
-# Prefer user-local executable directories. Use fish_add_path when available,
-# but keep a portable fallback for older Fish builds.
-if functions -q fish_add_path
-    fish_add_path --path --move "$HOME/bin"
-    fish_add_path --path --move "$HOME/.local/bin"
-else
-    for dir in "$HOME/bin" "$HOME/.local/bin"
-        if test -d "$dir"
-            if not contains -- "$dir" $PATH
-                set -gx PATH "$dir" $PATH
-            end
-        end
-    end
-end
-
-# Bun: only configure it when installed, so shells that do not use Bun pay
-# almost no startup cost.
-if test -d "$HOME/.bun"
-    set -gx BUN_INSTALL "$HOME/.bun"
-
-    if test -d "$BUN_INSTALL/bin"
-        if functions -q fish_add_path
-            fish_add_path --path --move "$BUN_INSTALL/bin"
-        else if not contains -- "$BUN_INSTALL/bin" $PATH
-            set -gx PATH "$BUN_INSTALL/bin" $PATH
-        end
-    end
-end
-
-# Everything below is only needed in an interactive shell.
-status is-interactive; or return
-
-# ---------------------------------------------------------------------------
-# fzf
-# ---------------------------------------------------------------------------
-
-if command -q fzf
-    fzf --fish | source
-end
-
-# ---------------------------------------------------------------------------
-# Tool integrations / aliases
-# ---------------------------------------------------------------------------
-
-if command -q eza
-    abbr --add ll 'eza -lag --git --icons --group-directories-first'
-else
-    # Portable fallback for systems whose ls does not support GNU color/grouping flags.
-    abbr --add ll 'ls -lah'
-end
-
-if command -q bat
-    abbr --add b 'bat'
-    if command -q man
-        set -gx MANPAGER 'bat -plman'
-    end
-end
-
-# ---------------------------------------------------------------------------
-# Aliases
-# ---------------------------------------------------------------------------
-
-abbr --add .. 'cd ..'
-abbr --add ... 'cd ../..'
-abbr --add .... 'cd ../../..'
-abbr --add ..... 'cd ../../../..'
-
-abbr --add c clear
-abbr --add k kubectl
-abbr --add ver 'cat /etc/*-release'
-abbr --add whoson 'last -w | tac'
-abbr --add details get_machine_info
-
-# Launch a throwaway, ephemeral Zellij instance"
-if command -q zellij
-    abbr --add z "zellij options --session-serialization false"
-end
-
-
-# Reload Fish configuration.
-abbr --add src 'source "$__fish_config_dir/config.fish"'
-
-# Python venvs provide a Fish-specific activation script.
-abbr --add venv 'source .venv/bin/activate.fish'
-
-# ---------------------------------------------------------------------------
-# Small helper functions
-# ---------------------------------------------------------------------------
-
-function myip --description 'Print primary IP address'
-    hostname -I 2>/dev/null | awk '{print $1}'
-end
-
-function mmkdir --description 'Create a directory and enter it'
-    if test (count $argv) -ne 1
-        printf 'usage: mmkdir <dir>\n' >&2
-        return 1
-    end
-
-    command mkdir -p "$argv[1]"
-    and builtin cd -- "$argv[1]"
-end
-
-function get_machine_info --description 'Print host, IP, and OS summary'
-    set -l distro unknown
-    set -l version_id unknown
-    set -l os
-    set -l ver
-    set -l name (hostname)
-    set -l ip
-
-    if test -r /etc/os-release
-        set -l id_line (string match -r '^ID=.*' </etc/os-release)
-        set -l version_line (string match -r '^VERSION_ID=.*' </etc/os-release)
-
-        if test -n "$id_line"
-            set distro (string replace 'ID=' '' "$id_line" | string trim -c '"')
-        end
-
-        if test -n "$version_line"
-            set version_id (string replace 'VERSION_ID=' '' "$version_line" | string trim -c '"')
-        end
-    end
-
-    if test "$distro" = ubuntu
-        set os ubu
-    else
-        set os "$distro"
-    end
-
-    set ver "$os$version_id"
-    set ip (hostname -I 2>/dev/null | awk '{print $1}')
-    if test -z "$ip"
-        set ip (hostname -i 2>/dev/null)
-    end
-
-    printf '******************************\n'
-    printf 'Hostname: %s\n' "$name"
-    printf 'IP address: %s\n' "$ip"
-    printf 'Operating system: %s\n' "$ver"
-    printf '******************************\n'
-end
-
-function get_os_short --description 'Print short OS identifier'
-    set -l os_id unknown
-    set -l os_version
-
-    if test -r /etc/os-release
-        set -l id_line (string match -r '^ID=.*' </etc/os-release)
-        set -l version_line (string match -r '^VERSION_ID=.*' </etc/os-release)
-
-        if test -n "$id_line"
-            set os_id (string replace 'ID=' '' "$id_line" | string trim -c '"')
-        end
-
-        if test -n "$version_line"
-            set os_version (string replace 'VERSION_ID=' '' "$version_line" | string trim -c '"')
-        end
-    end
-
-    if test "$os_id" = ubuntu
-        set os_id ubu
-    end
-
-    printf '%s%s' "$os_id" "$os_version"
-end
-
-function ssu --description 'Open root Fish shell using current user config and history'
-    set -l fish_path (command -s fish)
-
-    if test -z "$fish_path"
-        printf 'ssu: fish not found in PATH\n' >&2
-        return 127
-    end
-
-    set -l root_env "HOME=$HOME"
-    set -q XDG_CONFIG_HOME; and set -a root_env "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
-    set -q XDG_DATA_HOME; and set -a root_env "XDG_DATA_HOME=$XDG_DATA_HOME"
-
-    command sudo env $root_env "$fish_path" -i
-end
-
-function y --description 'Open yazi and cd to the directory it leaves behind'
-    if not command -q yazi
-        printf 'y: yazi is not installed; install it with your system package manager or this setup script on Linux x64.\n' >&2
-        return 127
-    end
-
-    set -l tmp (mktemp -t "yazi-cwd.XXXXXX")
-    command yazi $argv --cwd-file="$tmp"
-    if read -z cwd <"$tmp"; and test "$cwd" != "$PWD"; and test -d "$cwd"
-        builtin cd -- "$cwd"
-    end
-    command rm -f "$tmp"
-end
-
-# ---------------------------------------------------------------------------
-# Key bindings
-# ---------------------------------------------------------------------------
-# Delete backward to the nearest non-alphanumeric character. This makes
-# Ctrl+Backspace safer for paths by stopping at punctuation such as /, ., -,
-# and _ instead of deleting an entire path component chain at once.
-
-function __safe_backward_kill_word --description 'Safely delete backward to punctuation/whitespace boundary'
-    set -l line (commandline -b)
-    set -l point (commandline -C)
-
-    if test "$point" -le 0
-        return
-    end
-
-    # commandline -C is zero-based. Start by including the character directly
-    # before the cursor, then walk left while the preceding chars are alnum.
-    set -l pos (math $point - 1)
-
-    while test "$pos" -gt 0
-        # Fish string indexes are one-based. This is the char before $pos.
-        set -l char (string sub -s $pos -l 1 -- "$line")
-
-        if not string match -rq '^[[:alnum:]]$' -- "$char"
-            break
-        end
-
-        set pos (math $pos - 1)
-    end
-
-    set -l before ''
-    set -l after ''
-
-    if test "$pos" -gt 0
-        set before (string sub -s 1 -l $pos -- "$line")
-    end
-
-    if test "$point" -lt (string length -- "$line")
-        set after (string sub -s (math $point + 1) -- "$line")
-    end
-
-    commandline -r -- "$before$after"
-    commandline -C $pos
-    commandline -f repaint
-end
-
-# Ctrl+Backspace is terminal-dependent:
-# - Windows Terminal sends ctrl-w
-# - some terminals send ctrl-h
-# - Ghostty sends ctrl-backspace
-bind ctrl-w __safe_backward_kill_word
-bind ctrl-h __safe_backward_kill_word
-bind ctrl-backspace __safe_backward_kill_word
-
-# ---------------------------------------------------------------------------
-# Prompt
-# ---------------------------------------------------------------------------
-
-function fish_prompt
-    set -l user_color green
-    set -l prompt_symbol '>'
-
-    if fish_is_root_user
-        set user_color magenta
-        set prompt_symbol '#'
-    end
-
-    set_color --bold $user_color
-    printf '%s' "$USER"
-
-    set_color normal
-    printf '@'
-
-    set_color red
-    printf '%s' (prompt_hostname)
-
-    set_color --bold cyan
-    printf '(%s) ' (get_os_short)
-
-    set_color --bold blue
-    printf '%s' (prompt_pwd)
-
-    set_color normal
-    printf ' %s ' "$prompt_symbol"
-end
-EOF
+load_repo_content FISH_CONFIG_CONTENT "fish/config.fish"
 FISH_CONFIG_CONTENT="${FISH_CONFIG_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 
-read_content INPUTRC_CONTENT <<'EOF'
-set input-meta on
-set output-meta on
-set bell-style none
-
-# Let custom Readline bindings win instead of auto-reserving tty keys like Ctrl+W.
-set bind-tty-special-chars off
-
-set completion-ignore-case on
-set show-all-if-ambiguous on
-set mark-symlinked-directories on
-
-$if mode=emacs
-"\e[1~": beginning-of-line
-"\e[4~": end-of-line
-"\e[3~": delete-char
-"\e[2~": quoted-insert
-
-"\e[1;5C": forward-word
-"\e[1;5D": backward-word
-"\e[5C": forward-word
-"\e[5D": backward-word
-"\e\e[C": forward-word
-"\e\e[D": backward-word
-
-$if term=rxvt
-"\e[7~": beginning-of-line
-"\e[8~": end-of-line
-"\eOc": forward-word
-"\eOd": backward-word
-$endif
-$endif
-EOF
+load_repo_content INPUTRC_CONTENT "setupconfig/managed/inputrc"
 
 # Install a small custom Vim plugin so copy works reliably in SSH, tmux, and other remote terminals.
 # It uses OSC 52 escape sequences instead of depending on xclip/pbcopy or a local GUI clipboard.
-read_content OSCYANK_PLUGIN_CONTENT <<'EOF'
-" -------------------- INIT --------------------------------
-if exists('g:loaded_oscyank')
-  finish
-endif
-let g:loaded_oscyank = 1
-
-" -------------------- VARIABLES ---------------------------
-let s:mark = nr2char(96)
-let s:commands = {
-  \ 'operator': {'block': s:mark . '[\<C-v>' . s:mark . ']y', 'char': s:mark . '[v' . s:mark . ']y', 'line': "'[V']y"},
-  \ 'visual': {'': 'gvy', 'V': 'gvy', 'v': 'gvy', '\x16': 'gvy'}}
-let s:b64_table = [
-  \ 'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P',
-  \ 'Q','R','S','T','U','V','W','X','Y','Z','a','b','c','d','e','f',
-  \ 'g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v',
-  \ 'w','x','y','z','0','1','2','3','4','5','6','7','8','9','+','/']
-
-" -------------------- OPTIONS ---------------------------
-function s:options_max_length()
-  return get(g:, 'oscyank_max_length', 0)
-endfunction
-
-function s:options_silent()
-  return get(g:, 'oscyank_silent', 0)
-endfunction
-
-function s:options_trim()
-  return get(g:, 'oscyank_trim', 0)
-endfunction
-
-function s:options_osc52()
-  return get(g:, 'oscyank_osc52', "\x1b]52;c;%s\x07")
-endfunction
-
-" -------------------- UTILS -------------------------------
-function s:echo(text, hl)
-  echohl a:hl
-  echo printf('[oscyank] %s', a:text)
-  echohl None
-endfunction
-
-function s:encode_b64(str, size)
-  let bytes = map(range(len(a:str)), 'char2nr(a:str[v:val])')
-  let b64 = []
-
-  for i in range(0, len(bytes) - 1, 3)
-    let n = bytes[i] * 0x10000
-          \ + get(bytes, i + 1, 0) * 0x100
-          \ + get(bytes, i + 2, 0)
-    call add(b64, s:b64_table[n / 0x40000])
-    call add(b64, s:b64_table[n / 0x1000 % 0x40])
-    call add(b64, s:b64_table[n / 0x40 % 0x40])
-    call add(b64, s:b64_table[n % 0x40])
-  endfor
-
-  if len(bytes) % 3 == 1
-    let b64[-1] = '='
-    let b64[-2] = '='
-  endif
-
-  if len(bytes) % 3 == 2
-    let b64[-1] = '='
-  endif
-
-  let b64 = join(b64, '')
-  if a:size <= 0
-    return b64
-  endif
-
-  let chunked = ''
-  while strlen(b64) > 0
-    let chunked .= strpart(b64, 0, a:size) . "\n"
-    let b64 = strpart(b64, a:size)
-  endwhile
-
-  return chunked
-endfunction
-
-function s:get_text(mode, type)
-  let l:clipboard = &clipboard
-  let l:selection = &selection
-  let l:register = getreg('"')
-  let l:visual_marks = [getpos("'<"), getpos("'>")]
-
-  set clipboard=
-  set selection=inclusive
-  silent execute printf('keepjumps normal! %s', s:commands[a:mode][a:type])
-  let l:text = getreg('"')
-
-  let &clipboard = l:clipboard
-  let &selection = l:selection
-  call setreg('"', l:register)
-  call setpos("'<", l:visual_marks[0])
-  call setpos("'>", l:visual_marks[1])
-
-  return l:text
-endfunction
-
-function s:trim_text(text)
-  let l:text = a:text
-  let l:indent = matchstrpos(l:text, '^\s\+')
-
-  if l:indent[1] >= 0
-    let l:pattern = printf('\n%s', repeat('\s', l:indent[2] - l:indent[1]))
-    let l:text = substitute(l:text, l:pattern, '\n', 'g')
-  endif
-
-  return trim(l:text)
-endfunction
-
-function s:write(osc52)
-  if filewritable('/dev/fd/2') == 1
-    let l:success = writefile([a:osc52], '/dev/fd/2', 'b') == 0
-  elseif has('nvim')
-    let l:success = chansend(v:stderr, a:osc52) > 0
-  else
-    exec('silent! !echo ' . shellescape(a:osc52))
-    redraw!
-    let l:success = 1
-  endif
-  return l:success
-endfunction
-
-" -------------------- PUBLIC ------------------------------
-function! OSCYank(text) abort
-  let l:text = s:options_trim() ? s:trim_text(a:text) : a:text
-
-  if s:options_max_length() > 0 && strlen(l:text) > s:options_max_length()
-    call s:echo(printf('Selection is too big: length is %d, limit is %d', strlen(l:text), s:options_max_length()), 'WarningMsg')
-    return
-  endif
-
-  let l:text_b64 = s:encode_b64(l:text, 0)
-  let l:osc52 = printf(s:options_osc52(), l:text_b64)
-  let l:success = s:write(l:osc52)
-
-  if !l:success
-    call s:echo('Failed to copy selection', 'ErrorMsg')
-  elseif !s:options_silent()
-    call s:echo(printf('%d characters copied', strlen(l:text)), 'Normal')
-  endif
-
-  return l:success
-endfunction
-
-function! OSCYankOperatorCallback(type) abort
-  let l:text = s:get_text('operator', a:type)
-  return OSCYank(l:text)
-endfunction
-
-function! OSCYankOperator() abort
-  set operatorfunc=OSCYankOperatorCallback
-  return 'g@'
-endfunction
-
-function! OSCYankVisual() abort
-  let l:text = s:get_text('visual', visualmode())
-  return OSCYank(l:text)
-endfunction
-
-function! OSCYankRegister(register) abort
-  let l:text = getreg(a:register)
-  return OSCYank(l:text)
-endfunction
-
-" -------------------- COMMANDS ----------------------------
-command! -nargs=1 OSCYank call OSCYank('<args>')
-command! -range OSCYankVisual call OSCYankVisual()
-command! -register OSCYankRegister call OSCYankRegister('<reg>')
-
-nnoremap <expr> <Plug>OSCYankOperator OSCYankOperator()
-vnoremap <Plug>OSCYankVisual :OSCYankVisual<CR>
-EOF
+load_repo_content OSCYANK_PLUGIN_CONTENT "setupconfig/files/oscyank.vim"
 
 log "Applying managed configuration blocks"
 mkdir -p "$VIM_PLUGIN_DIR" "$VIM_UNDO_DIR"

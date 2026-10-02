@@ -1,0 +1,31 @@
+# tool	repository	os	arch	asset-template	format	archive-member	version-argument
+# {tag} is the release tag; {version} is the tag with one leading v removed.
+# Add a row when a provider publishes a new OS/architecture combination.
+fzf	junegunn/fzf	Linux	x86_64	fzf-{version}-linux_amd64.tar.gz	tar	fzf	--version
+fzf	junegunn/fzf	Linux	aarch64	fzf-{version}-linux_arm64.tar.gz	tar	fzf	--version
+fzf	junegunn/fzf	Darwin	x86_64	fzf-{version}-darwin_amd64.tar.gz	tar	fzf	--version
+fzf	junegunn/fzf	Darwin	aarch64	fzf-{version}-darwin_arm64.tar.gz	tar	fzf	--version
+bat	sharkdp/bat	Linux	x86_64	bat-{tag}-x86_64-unknown-linux-gnu.tar.gz	tar	bat-{tag}-x86_64-unknown-linux-gnu/bat	--version
+bat	sharkdp/bat	Linux	aarch64	bat-{tag}-aarch64-unknown-linux-gnu.tar.gz	tar	bat-{tag}-aarch64-unknown-linux-gnu/bat	--version
+bat	sharkdp/bat	Darwin	x86_64	bat-{tag}-x86_64-apple-darwin.tar.gz	tar	bat-{tag}-x86_64-apple-darwin/bat	--version
+bat	sharkdp/bat	Darwin	aarch64	bat-{tag}-aarch64-apple-darwin.tar.gz	tar	bat-{tag}-aarch64-apple-darwin/bat	--version
+eza	eza-community/eza	Linux	x86_64	eza_x86_64-unknown-linux-gnu.tar.gz	tar	./eza	--version
+eza	eza-community/eza	Linux	aarch64	eza_aarch64-unknown-linux-gnu.tar.gz	tar	./eza	--version
+rg	BurntSushi/ripgrep	Linux	x86_64	ripgrep-{version}-x86_64-unknown-linux-musl.tar.gz	tar	ripgrep-{version}-x86_64-unknown-linux-musl/rg	--version
+rg	BurntSushi/ripgrep	Linux	aarch64	ripgrep-{version}-aarch64-unknown-linux-musl.tar.gz	tar	ripgrep-{version}-aarch64-unknown-linux-musl/rg	--version
+rg	BurntSushi/ripgrep	Darwin	x86_64	ripgrep-{version}-x86_64-apple-darwin.tar.gz	tar	ripgrep-{version}-x86_64-apple-darwin/rg	--version
+rg	BurntSushi/ripgrep	Darwin	aarch64	ripgrep-{version}-aarch64-apple-darwin.tar.gz	tar	ripgrep-{version}-aarch64-apple-darwin/rg	--version
+yazi	sxyazi/yazi	Linux	x86_64	yazi-{arch}-unknown-linux-gnu.zip	zip	yazi-{arch}-unknown-linux-gnu/yazi	--version
+yazi	sxyazi/yazi	Linux	aarch64	yazi-{arch}-unknown-linux-gnu.zip	zip	yazi-{arch}-unknown-linux-gnu/yazi	--version
+yazi	sxyazi/yazi	Darwin	x86_64	yazi-{arch}-apple-darwin.zip	zip	yazi-{arch}-apple-darwin/yazi	--version
+yazi	sxyazi/yazi	Darwin	aarch64	yazi-{arch}-apple-darwin.zip	zip	yazi-{arch}-apple-darwin/yazi	--version
+ya	sxyazi/yazi	Linux	x86_64	yazi-{arch}-unknown-linux-gnu.zip	zip	yazi-{arch}-unknown-linux-gnu/ya	--version
+ya	sxyazi/yazi	Linux	aarch64	yazi-{arch}-unknown-linux-gnu.zip	zip	yazi-{arch}-unknown-linux-gnu/ya	--version
+ya	sxyazi/yazi	Darwin	x86_64	yazi-{arch}-apple-darwin.zip	zip	yazi-{arch}-apple-darwin/ya	--version
+ya	sxyazi/yazi	Darwin	aarch64	yazi-{arch}-apple-darwin.zip	zip	yazi-{arch}-apple-darwin/ya	--version
+zellij	zellij-org/zellij	Linux	x86_64	zellij-x86_64-unknown-linux-musl.tar.gz	tar	zellij	--version
+zellij	zellij-org/zellij	Linux	aarch64	zellij-aarch64-unknown-linux-musl.tar.gz	tar	zellij	--version
+zellij	zellij-org/zellij	Darwin	x86_64	zellij-x86_64-apple-darwin.tar.gz	tar	zellij	--version
+zellij	zellij-org/zellij	Darwin	aarch64	zellij-aarch64-apple-darwin.tar.gz	tar	zellij	--version
+fish	fish-shell/fish-shell	Linux	x86_64	fish-{version}-linux-x86_64.tar.xz	tar	fish-{version}-linux-x86_64/bin/fish	--version
+fish	fish-shell/fish-shell	Linux	aarch64	fish-{version}-linux-aarch64.tar.xz	tar	fish-{version}-linux-aarch64/bin/fish	--version
