@@ -8,7 +8,7 @@ PATH_WITHOUT_USER_TOOLS="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 command -v git >/dev/null 2>&1 || { printf 'SKIP: git is unavailable\n'; exit 0; }
 command -v vim >/dev/null 2>&1 || { printf 'SKIP: vim is unavailable\n'; exit 0; }
 
-bash -n "$ROOT_DIR/setupconfig.sh"
+bash -n "$ROOT_DIR/setupconfig/setupconfig.sh"
 sh -n "$ROOT_DIR/scripts/osc52"
 
 [ "$("$ROOT_DIR/scripts/osc52" --version)" = 'osc52 2.0.0' ]
@@ -34,7 +34,7 @@ run_setup() {
   XDG_CONFIG_HOME="$TEST_HOME/config" \
   XDG_STATE_HOME="$TEST_HOME/state" \
   PATH="$TEST_BIN:$PATH_WITHOUT_USER_TOOLS" \
-  bash "$ROOT_DIR/setupconfig.sh" "$@"
+  bash "$ROOT_DIR/setupconfig/setupconfig.sh" "$@"
 }
 
 mkdir -p "$TEST_HOME/.local/bin"

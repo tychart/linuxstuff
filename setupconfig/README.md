@@ -1,6 +1,6 @@
 # setupconfig sources
 
-`setupconfig.sh` treats this directory as repository-managed input.
+`setupconfig/setupconfig.sh` treats this directory as repository-managed input.
 
 - `managed/` contains fragments inserted into marked blocks in user dotfiles.
 - `files/oscyank.vim` is installed as the Vim plugin.
@@ -33,17 +33,19 @@ separately and does not receive Linux/glibc release binaries. Add a row for a
 provider's published naming convention rather than adding shell logic.
 
 Compiled tools installed by this script are owned by setupconfig and live in
-`~/.local/bin`. Their release tag and manifest row are recorded under
-`${XDG_STATE_HOME:-~/.local/state}/setupconfig/releases`. A replacement is
-only moved into place after download, extraction, executable validation, and
-`--version` succeeds. Existing executables are never deleted first.
+`~/.local/bin`. Each run resolves the provider's latest stable release and runs the
+installed executable's version command. The first semantic version in that
+output is compared with the release tag; no state files are required. A
+replacement is only moved into place after download, extraction, executable
+validation, version validation, and `--version` succeeds. Existing
+executables are never deleted first.
 
 Use `--install-optional` to install or update all seven configured non-Fish
 compiled tools without prompting. On an interactive run without that flag,
 the script asks one question: `Y` installs/updates all seven, `N` skips them
 without querying GitHub, and `S` preserves the existing per-tool prompts.
-Current tools remain quiet; only missing tools, stale managed tools, and
-state migrations require a per-tool question in `S` mode.
+Current tools remain quiet; only missing, stale, or unknown-version tools
+require a per-tool question in `S` mode.
 
 Fish is asked about separately after that decision when a matching release row
 exists. `--install-fish` installs or updates Fish without prompting. In a

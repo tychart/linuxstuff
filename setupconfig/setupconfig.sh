@@ -35,17 +35,15 @@
 #     skip optional tools and Fish unless their explicit flags are passed.
 #
 # Usage:
-#   chmod +x setupconfig.sh
-#   ./setupconfig.sh
-#   ./setupconfig.sh --install-optional
-#   ./setupconfig.sh --install-fish
-#   ./setupconfig.sh --install-optional
+#   chmod +x setupconfig/setupconfig.sh
+#   ./setupconfig/setupconfig.sh
+#   ./setupconfig/setupconfig.sh --install-optional
+#   ./setupconfig/setupconfig.sh --install-fish
 #
 #   or
-#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig.sh | bash -s -- --install-optional
-#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig.sh | bash -s -- --install-fish
-#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig.sh | bash -s -- --install-optional
+#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig/setupconfig.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig/setupconfig.sh | bash -s -- --install-optional
+#   curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig/setupconfig.sh | bash -s -- --install-fish
 
 set -euo pipefail
 
@@ -69,8 +67,16 @@ find_local_source_root() {
 
   [[ -n $script_path && -f $script_path ]] || return 1
   candidate="$(cd "$(dirname "$script_path")" 2>/dev/null && pwd -P)" || return 1
-  [[ -d $candidate/setupconfig && -d $candidate/scripts ]] || return 1
-  printf '%s' "$candidate"
+  if [[ -d $candidate/setupconfig && -d $candidate/scripts ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  if [[ -d $candidate/../setupconfig && -d $candidate/../scripts ]]; then
+    candidate="$(cd "$candidate/.." 2>/dev/null && pwd -P)" || return 1
+    printf '%s' "$candidate"
+    return 0
+  fi
+  return 1
 }
 
 if SETUPCONFIG_SOURCE_ROOT="$(find_local_source_root)"; then
@@ -209,10 +215,9 @@ log() {
 show_usage() {
   cat <<EOF
 Usage:
-  ./setupconfig.sh
-  ./setupconfig.sh --install-optional
-  ./setupconfig.sh --install-fish
-  ./setupconfig.sh --install-optional
+  ./setupconfig/setupconfig.sh
+  ./setupconfig/setupconfig.sh --install-optional
+  ./setupconfig/setupconfig.sh --install-fish
 
   --install-optional   install/update all seven non-Fish compiled tools
                        without prompting; only matching OS/architectures run
@@ -516,8 +521,8 @@ is_shebang_script() {
 # changed.
 # ---------------------------------------------------------------------------
 
-NICE_TO_HAVE_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/setupconfig/releases"
 GITHUB_TAG_CACHE=''
+CURRENT_PLATFORM_ARCH=''
 
 is_macho_binary() {
   local magic
@@ -594,7 +599,9 @@ release_tag_for_repo() {
   response="$(mktemp)"
   register_temp_file "$response"
   if curl -fsSL --retry 3 --max-time 30 -sS -o "$response" "$api_url"; then
-    tag="$(awk -F '"' '/"tag_name"/ { print $4; exit }' "$response")"
+    tag="$(grep -Eo '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' "$response" |
+      head -n 1 |
+      sed -E 's/.*"([^"]+)"$/\1/')"
   else
     tag=''
   fi
@@ -719,17 +726,72 @@ install_repo_executable() {
   log "Installed managed executable '$label' -> $destination ($version)"
 }
 
-install_github_manifest_tool() {
+PENDING_TOOL_NAMES=()
+PENDING_REPOS=()
+PENDING_TAGS=()
+PENDING_ASSETS=()
+PENDING_FORMATS=()
+PENDING_MEMBERS=()
+PENDING_VERSION_ARGS=()
+PENDING_ACTIONS=()
+PENDING_INSTALLED_VERSIONS=()
+PENDING_TARGET_VERSIONS=()
+
+reset_pending_tools() {
+  PENDING_TOOL_NAMES=()
+  PENDING_REPOS=()
+  PENDING_TAGS=()
+  PENDING_ASSETS=()
+  PENDING_FORMATS=()
+  PENDING_MEMBERS=()
+  PENDING_VERSION_ARGS=()
+  PENDING_ACTIONS=()
+  PENDING_INSTALLED_VERSIONS=()
+  PENDING_TARGET_VERSIONS=()
+}
+
+normalize_version() {
+  # Extract the first semantic version without Bash 4 string features. The
+  # explicit true keeps set -euo pipefail from treating a version-less output
+  # as a fatal installer error.
+  printf '%s\n' "$1" |
+    grep -Eo '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' |
+    head -n 1 || true
+}
+
+read_installed_version() {
+  local executable="$1"
+  local version_argument="$2"
+  local output
+
+  [[ -x $executable ]] || return 1
+  output="$($executable "$version_argument" 2>/dev/null)" || return 1
+  [[ -n $output ]] || return 1
+  normalize_version "$output"
+}
+
+append_pending_tool() {
+  local index=${#PENDING_TOOL_NAMES[@]}
+
+  PENDING_TOOL_NAMES[$index]="$1"
+  PENDING_REPOS[$index]="$2"
+  PENDING_TAGS[$index]="$3"
+  PENDING_ASSETS[$index]="$4"
+  PENDING_FORMATS[$index]="$5"
+  PENDING_MEMBERS[$index]="$6"
+  PENDING_VERSION_ARGS[$index]="$7"
+  PENDING_ACTIONS[$index]="$8"
+  PENDING_INSTALLED_VERSIONS[$index]="$9"
+  PENDING_TARGET_VERSIONS[${index}]="${10}"
+}
+
+preflight_manifest_tool() {
   local tool="$1"
   local manifest_file="$2"
   local target_os="$3"
   local target_arch="$4"
-  local auto_install="$5"
-  local tool_label="$6"
   local row_tool row_repo row_os row_arch row_asset row_format row_member row_version_arg
-  local tag asset member state_file expected_state current_state url
-  local destination="$NICE_TO_HAVE_BIN_DIR/$tool"
-  local asset_tmp candidate state_tmp version
+  local tag target_version installed_version action destination
   local found=0
 
   while IFS="$(printf '\t')" read -r row_tool row_repo row_os row_arch row_asset row_format row_member row_version_arg; do
@@ -737,98 +799,143 @@ install_github_manifest_tool() {
     [[ $row_tool == "$tool" && $row_os == "$target_os" && $row_arch == "$target_arch" ]] || continue
     found=1
 
-    state_file="$NICE_TO_HAVE_STATE_DIR/$tool"
-    current_state=''
-    [[ -f $state_file ]] && current_state="$(cat "$state_file")"
-    tag=''
-
-    # Do not make release API calls for missing optional tools until the user
-    # opts in. Existing managed tools do need a tag lookup so updates can be
-    # detected; a missing state file is treated as a one-time migration.
-    if [[ -x $destination ]] && is_valid_release_executable "$destination" &&
-       [[ -n $current_state ]]; then
-      if ! tag="$(release_tag_for_repo "$row_repo")"; then
-        log "Could not resolve the latest GitHub release for $row_repo; leaving $destination unchanged"
-        return 0
-      fi
-      expected_state="$tag$(printf '\t')$row_tool$(printf '\t')$row_repo$(printf '\t')$row_os$(printf '\t')$row_arch$(printf '\t')$row_asset$(printf '\t')$row_format$(printf '\t')$row_member"
-      if [[ "$current_state" == "$expected_state" ]]; then
-        log "$tool is current ($destination, release $tag)"
-        return 0
-      fi
-    elif [[ $auto_install != 1 ]]; then
-      if [[ -e $destination ]]; then
-        log "$tool needs a managed update or state migration ($destination)"
-      else
-        log "$tool is not installed ($destination)"
-      fi
-      if ! confirm_prompt "Download/install the latest ${tool_label} '$tool' from ${row_repo}?"; then
-        log "Skipping $tool. Re-run with --install-optional to install/update without prompting."
-        return 0
-      fi
-    fi
-
-    if [[ -z $tag ]] && ! tag="$(release_tag_for_repo "$row_repo")"; then
-      log "Could not resolve the latest GitHub release for $row_repo; leaving $destination unchanged"
+    if ! tag="$(release_tag_for_repo "$row_repo")"; then
+      log "Could not resolve the latest GitHub release for $row_repo; leaving $tool unchanged"
       return 0
     fi
-    asset="$(manifest_value "$row_asset" "$tag" "$target_arch")"
-    member="$(manifest_value "$row_member" "$tag" "$target_arch")"
-    expected_state="$tag$(printf '\t')$row_tool$(printf '\t')$row_repo$(printf '\t')$row_os$(printf '\t')$row_arch$(printf '\t')$row_asset$(printf '\t')$row_format$(printf '\t')$row_member"
-
-    if [[ $auto_install != 1 && -x $destination && -n $current_state ]]; then
-      if ! confirm_prompt "Update ${tool_label} '$tool' to GitHub release ${tag}?"; then
-        log "Skipping $tool. Re-run with --install-optional to update without prompting."
-        return 0
-      fi
-    fi
-
-    mkdir -p "$NICE_TO_HAVE_BIN_DIR" "$NICE_TO_HAVE_STATE_DIR"
-    asset_tmp="$(mktemp "$NICE_TO_HAVE_BIN_DIR/.${tool}.asset.XXXXXX")"
-    candidate="$(mktemp "$NICE_TO_HAVE_BIN_DIR/.${tool}.candidate.XXXXXX")"
-    register_temp_file "$asset_tmp"
-    register_temp_file "$candidate"
-    url="https://github.com/${row_repo}/releases/download/${tag}/${asset}"
-
-    if ! curl -fL --retry 3 --max-time 120 -sS -o "$asset_tmp" "$url"; then
-      rm -f "$asset_tmp" "$candidate"
-      log "Failed to download $tool from $url; leaving the existing executable untouched"
-      return 0
-    fi
-    if ! extract_release_member "$asset_tmp" "$row_format" "$member" "$candidate" ||
-       [[ ! -s $candidate ]] || ! is_valid_release_executable "$candidate"; then
-      rm -f "$asset_tmp" "$candidate"
-      log "Downloaded $tool did not contain a valid executable; leaving the existing executable untouched"
+    target_version="$(normalize_version "$tag")"
+    if [[ -z $target_version ]]; then
+      log "Could not determine a semantic version from release tag '$tag' for $tool; leaving it unchanged"
       return 0
     fi
 
-    chmod 755 "$candidate"
-    if ! version="$("$candidate" "$row_version_arg" 2>/dev/null | head -n 1)" || [[ -z $version ]]; then
-      rm -f "$asset_tmp" "$candidate"
-      log "Downloaded $tool failed its $row_version_arg smoke test; leaving the existing executable untouched"
-      return 0
+    destination="$NICE_TO_HAVE_BIN_DIR/$tool"
+    action=install
+    installed_version=''
+    if [[ -e $destination || -L $destination ]]; then
+      action=update
+      if is_valid_release_executable "$destination"; then
+        installed_version="$(read_installed_version "$destination" "$row_version_arg")" || installed_version=''
+      fi
+      if [[ -n $installed_version && $installed_version == "$target_version" ]]; then
+        log "$tool is current ($destination, version $installed_version)"
+        return 0
+      fi
+      [[ -n $installed_version ]] || installed_version='unknown'
     fi
 
-    mv -f "$candidate" "$destination"
-    rm -f "$asset_tmp"
-    state_tmp="$(mktemp "$NICE_TO_HAVE_STATE_DIR/.${tool}.state.XXXXXX")"
-    register_temp_file "$state_tmp"
-    printf '%s\n' "$expected_state" > "$state_tmp"
-    chmod 600 "$state_tmp"
-    mv -f "$state_tmp" "$state_file"
-    log "Installed/updated $tool -> $destination ($version; release $tag)"
+    append_pending_tool \
+      "$row_tool" "$row_repo" "$tag" "$row_asset" "$row_format" \
+      "$row_member" "$row_version_arg" "$action" "$installed_version" \
+      "$target_version"
     return 0
   done < "$manifest_file"
 
   [[ $found -eq 1 ]] || log "No GitHub release asset is configured for $tool on ${target_os}/${target_arch}; skipping"
 }
 
+print_pending_summary() {
+  local i=0
+  local action tool installed target
+
+  [[ ${#PENDING_TOOL_NAMES[@]} -gt 0 ]] || return 0
+  log "Optional tools needing action:"
+  while [[ $i -lt ${#PENDING_TOOL_NAMES[@]} ]]; do
+    action="${PENDING_ACTIONS[$i]}"
+    tool="${PENDING_TOOL_NAMES[$i]}"
+    installed="${PENDING_INSTALLED_VERSIONS[$i]}"
+    target="${PENDING_TARGET_VERSIONS[$i]}"
+    if [[ $action == install ]]; then
+      log "  Install $tool $target"
+    else
+      log "  Update $tool ${installed} -> ${target}"
+    fi
+    i=$((i + 1))
+  done
+}
+
+confirm_pending_tool() {
+  local index="$1"
+  local action="${PENDING_ACTIONS[$index]}"
+  local tool="${PENDING_TOOL_NAMES[$index]}"
+  local installed="${PENDING_INSTALLED_VERSIONS[$index]}"
+  local target="${PENDING_TARGET_VERSIONS[$index]}"
+  local prompt
+
+  if [[ $action == install ]]; then
+    prompt="Install $tool $target?"
+  else
+    prompt="Update $tool ${installed} -> ${target}?"
+  fi
+  confirm_prompt "$prompt"
+}
+
+install_pending_tool() {
+  local index="$1"
+  local tool="${PENDING_TOOL_NAMES[$index]}"
+  local repository="${PENDING_REPOS[$index]}"
+  local tag="${PENDING_TAGS[$index]}"
+  local asset_template="${PENDING_ASSETS[$index]}"
+  local format="${PENDING_FORMATS[$index]}"
+  local member_template="${PENDING_MEMBERS[$index]}"
+  local version_argument="${PENDING_VERSION_ARGS[$index]}"
+  local action="${PENDING_ACTIONS[$index]}"
+  local target_version="${PENDING_TARGET_VERSIONS[$index]}"
+  local asset member url destination
+  local asset_tmp candidate candidate_output candidate_version
+  local version version_output action_label
+
+  asset="$(manifest_value "$asset_template" "$tag" "$CURRENT_PLATFORM_ARCH")"
+  member="$(manifest_value "$member_template" "$tag" "$CURRENT_PLATFORM_ARCH")"
+  destination="$NICE_TO_HAVE_BIN_DIR/$tool"
+  mkdir -p "$NICE_TO_HAVE_BIN_DIR"
+  asset_tmp="$(mktemp "$NICE_TO_HAVE_BIN_DIR/.${tool}.asset.XXXXXX")"
+  candidate="$(mktemp "$NICE_TO_HAVE_BIN_DIR/.${tool}.candidate.XXXXXX")"
+  register_temp_file "$asset_tmp"
+  register_temp_file "$candidate"
+  url="https://github.com/${repository}/releases/download/${tag}/${asset}"
+
+  if ! curl -fL --retry 3 --max-time 120 -sS -o "$asset_tmp" "$url"; then
+    rm -f "$asset_tmp" "$candidate"
+    log "Failed to download $tool from $url; leaving the existing executable untouched"
+    return 0
+  fi
+  if ! extract_release_member "$asset_tmp" "$format" "$member" "$candidate" ||
+     [[ ! -s $candidate ]] || ! is_valid_release_executable "$candidate"; then
+    rm -f "$asset_tmp" "$candidate"
+    log "Downloaded $tool did not contain a valid executable; leaving the existing executable untouched"
+    return 0
+  fi
+
+  chmod 755 "$candidate"
+  candidate_output="$($candidate "$version_argument" 2>/dev/null)" || candidate_output=''
+  candidate_version="$(normalize_version "$candidate_output")"
+  if [[ -z $candidate_output || -z $candidate_version || $candidate_version != "$target_version" ]]; then
+    rm -f "$asset_tmp" "$candidate"
+    log "Downloaded $tool reported version '${candidate_version:-unknown}', expected $target_version; leaving the existing executable untouched"
+    return 0
+  fi
+
+  mv -f "$candidate" "$destination"
+  rm -f "$asset_tmp"
+  version_output="$($destination "$version_argument" 2>/dev/null)" || version_output=''
+  version="$(normalize_version "$version_output")"
+  if [[ $action == install ]]; then
+    action_label=Installed
+  else
+    action_label=Updated
+  fi
+  log "$action_label $tool -> $destination (${version:-$target_version}; release $tag)"
+}
+
 ensure_manifest_tools() {
   local auto_install="$1"
-  shift
+  local prompt_style="$2"
+  shift 2
   local manifest_file
-  local os arch tool
+  local os arch tool i mode
 
+  reset_pending_tools
   command -v curl >/dev/null 2>&1 || {
     log "curl is required for GitHub release assets; skipping compiled tools"
     return 0
@@ -844,66 +951,69 @@ ensure_manifest_tools() {
 
   os="$(platform_os)"
   arch="$(platform_arch)"
+  CURRENT_PLATFORM_ARCH="$arch"
   GITHUB_TAG_CACHE="$(mktemp)"
   register_temp_file "$GITHUB_TAG_CACHE"
 
   for tool in "$@"; do
-    install_github_manifest_tool "$tool" "$manifest_file" "$os" "$arch" "$auto_install" "GitHub release asset"
+    preflight_manifest_tool "$tool" "$manifest_file" "$os" "$arch"
   done
-}
 
-has_prompt_tty() {
-  [[ -t 0 ]] || ( exec 3< /dev/tty ) 2>/dev/null
-}
+  if [[ ${#PENDING_TOOL_NAMES[@]} -eq 0 ]]; then
+    return 0
+  fi
+  print_pending_summary
 
-prompt_optional_tool_mode() {
-  local reply=''
-
-  if [[ -t 0 ]]; then
-    printf '\n[setup] Install optional tools? [Y]es all, [N]o, [S]elect individually: ' >&2
-    IFS= read -r reply || return 1
-  elif ( exec 3< /dev/tty ) 2>/dev/null; then
-    printf '\n[setup] Install optional tools? [Y]es all, [N]o, [S]elect individually: ' >&2
-    IFS= read -r reply < /dev/tty || return 1
-  else
-    return 1
+  if [[ $auto_install == 1 ]]; then
+    i=0
+    while [[ $i -lt ${#PENDING_TOOL_NAMES[@]} ]]; do
+      install_pending_tool "$i"
+      i=$((i + 1))
+    done
+    return 0
   fi
 
-  case "$reply" in
-    y|Y|yes|YES|all|ALL) printf 'all' ;;
-    n|N|no|NO|none|NONE|'') printf 'none' ;;
-    s|S|select|SELECT|individual|INDIVIDUAL) printf 'individual' ;;
-    *)
-      printf '[setup] Please answer Y (all), N (none), or S (select individually).\n' >&2
-      prompt_optional_tool_mode
-      ;;
-  esac
-}
+  if ! has_prompt_tty; then
+    log "No interactive terminal; skipping these tools."
+    return 0
+  fi
 
-# Portable scripts are not optional: they are repository-managed source and are
-# synchronized even on ARM, Darwin, Termux, and unsupported platforms.
-ensure_nice_to_haves() {
-  local mode
-
-  install_repo_executable "scripts/osc52" "$NICE_TO_HAVE_BIN_DIR/osc52" "osc52"
-
-  if [[ $INSTALL_NICE_TO_HAVES == 1 ]]; then
-    log "Installing/updating all optional tools without prompting"
-    ensure_manifest_tools 1 fzf bat eza rg ya yazi zellij
+  if [[ $prompt_style == single ]]; then
+    i=0
+    while [[ $i -lt ${#PENDING_TOOL_NAMES[@]} ]]; do
+      if confirm_pending_tool "$i"; then
+        install_pending_tool "$i"
+      else
+        log "Skipping ${PENDING_TOOL_NAMES[$i]}"
+      fi
+      i=$((i + 1))
+    done
     return 0
   fi
 
   if ! mode="$(prompt_optional_tool_mode)"; then
-    log "No interactive terminal; skipping optional tools. Use --install-optional to install/update all of them."
+    log "No interactive terminal; skipping these tools."
     return 0
   fi
 
   case "$mode" in
     all)
-      ensure_manifest_tools 1 fzf bat eza rg ya yazi zellij
+      i=0
+      while [[ $i -lt ${#PENDING_TOOL_NAMES[@]} ]]; do
+        install_pending_tool "$i"
+        i=$((i + 1))
+      done
       ;;
     individual)
-      ensure_manifest_tools 0 fzf bat eza rg ya yazi zellij
+      i=0
+      while [[ $i -lt ${#PENDING_TOOL_NAMES[@]} ]]; do
+        if confirm_pending_tool "$i"; then
+          install_pending_tool "$i"
+        else
+          log "Skipping ${PENDING_TOOL_NAMES[$i]}"
+        fi
+        i=$((i + 1))
+      done
       ;;
     none)
       log "Skipping all optional tools at user request"
@@ -911,18 +1021,24 @@ ensure_nice_to_haves() {
   esac
 }
 
+has_prompt_tty() {
+  [[ -t 0 ]] || ( exec 3< /dev/tty ) 2>/dev/null
+}
+
+# Portable scripts are not optional: they are repository-managed source and are
+# synchronized even on ARM, Darwin, Termux, and unsupported platforms.
+ensure_nice_to_haves() {
+  install_repo_executable "scripts/osc52" "$NICE_TO_HAVE_BIN_DIR/osc52" "osc52"
+  ensure_manifest_tools "$INSTALL_NICE_TO_HAVES" group fzf bat eza rg ya yazi zellij
+}
+
 ensure_fish() {
   if [[ $INSTALL_FISH == 1 ]]; then
-    ensure_manifest_tools 1 fish
+    ensure_manifest_tools 1 single fish
     return 0
   fi
 
-  if ! has_prompt_tty; then
-    log "No interactive terminal; skipping Fish. Use --install-fish to install/update it without prompting."
-    return 0
-  fi
-
-  ensure_manifest_tools 0 fish
+  ensure_manifest_tools 0 single fish
 }
 
 # ---------------------------------------------------------------------------
