@@ -29,10 +29,10 @@
 #   - Installs the tokyo-night yazi flavor once via 'ya pkg add' (yazi's own
 #     package manager) when the flavor files are missing, so the theme
 #     referenced by the managed theme.toml actually loads
-#   - Nice-to-have installs prompt on the terminal, even when piped via
-#     curl-pipe-to-bash runs (the prompt opens /dev/tty). Fully
-#     non-interactive runs (cron, CI, ssh without a tty) skip instead, unless
-#     --install-optional is passed, which auto-installs without prompting
+#   - Interactive runs ask once whether to install all non-Fish optional tools,
+#     skip them, or keep the existing per-tool prompts. The prompt also works
+#     for curl-pipe-to-bash by reading /dev/tty. Fully non-interactive runs
+#     skip optional tools and Fish unless their explicit flags are passed.
 #
 # Usage:
 #   chmod +x setupconfig.sh
@@ -105,9 +105,10 @@ OSCYANK_FILE="$VIM_PLUGIN_DIR/oscyank.vim"
 readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE ZSHRC_FILE VIMRC_FILE INPUTRC_FILE FISH_CONFIG_FILE
 readonly VIM_DIR VIM_PLUGIN_DIR VIM_UNDO_DIR OSCYANK_FILE
 
-# Optional compiled assets are installed/updated without prompting when
-# --install-optional is supplied. The manifest always enforces OS and
-# architecture matching; incompatible binaries are never forced onto a host.
+# --install-optional selects all seven non-Fish compiled tools without
+# prompting. Interactive runs otherwise offer All, None, or the existing
+# per-tool selection flow. The manifest always enforces OS and architecture
+# matching; incompatible binaries are never forced onto a host.
 INSTALL_NICE_TO_HAVES=0
 INSTALL_FISH=0
 
@@ -213,9 +214,9 @@ Usage:
   ./setupconfig.sh --install-fish
   ./setupconfig.sh --install-optional
 
-  --install-optional   install/update manifest-selected compiled assets
+  --install-optional   install/update all seven non-Fish compiled tools
                        without prompting; only matching OS/architectures run
-  --install-fish       install/update fish from the matching release asset
+  --install-fish       install/update Fish from its matching release asset
                        into ~/.local/bin without prompting
   --install-x64-binaries
                        deprecated compatibility alias for --install-optional;
@@ -540,8 +541,18 @@ normalize_arch() {
   esac
 }
 
+is_termux() {
+  [[ -n ${TERMUX_VERSION:-} ]] && return 0
+  [[ -n ${PREFIX:-} && $PREFIX == */com.termux/* ]] && return 0
+  return 1
+}
+
 platform_os() {
-  uname -s 2>/dev/null || printf unknown
+  if is_termux; then
+    printf 'Termux'
+  else
+    uname -s 2>/dev/null || printf unknown
+  fi
 }
 
 platform_arch() {
@@ -816,16 +827,77 @@ ensure_manifest_tools() {
   done
 }
 
+has_prompt_tty() {
+  [[ -t 0 ]] || ( exec 3< /dev/tty ) 2>/dev/null
+}
+
+prompt_optional_tool_mode() {
+  local reply=''
+
+  if [[ -t 0 ]]; then
+    printf '\n[setup] Install optional tools? [Y]es all, [N]o, [S]elect individually: ' >&2
+    IFS= read -r reply || return 1
+  elif ( exec 3< /dev/tty ) 2>/dev/null; then
+    printf '\n[setup] Install optional tools? [Y]es all, [N]o, [S]elect individually: ' >&2
+    IFS= read -r reply < /dev/tty || return 1
+  else
+    return 1
+  fi
+
+  case "$reply" in
+    y|Y|yes|YES|all|ALL) printf 'all' ;;
+    n|N|no|NO|none|NONE|'') printf 'none' ;;
+    s|S|select|SELECT|individual|INDIVIDUAL) printf 'individual' ;;
+    *)
+      printf '[setup] Please answer Y (all), N (none), or S (select individually).\n' >&2
+      prompt_optional_tool_mode
+      ;;
+  esac
+}
+
 # Portable scripts are not optional: they are repository-managed source and are
 # synchronized even on ARM, Darwin, Termux, and unsupported platforms.
 ensure_nice_to_haves() {
+  local mode
+
   install_repo_executable "scripts/osc52" "$NICE_TO_HAVE_BIN_DIR/osc52" "osc52"
-  ensure_manifest_tools "$INSTALL_NICE_TO_HAVES" fzf bat eza rg ya yazi zellij
+
+  if [[ $INSTALL_NICE_TO_HAVES == 1 ]]; then
+    log "Installing/updating all optional tools without prompting"
+    ensure_manifest_tools 1 fzf bat eza rg ya yazi zellij
+    return 0
+  fi
+
+  if ! mode="$(prompt_optional_tool_mode)"; then
+    log "No interactive terminal; skipping optional tools. Use --install-optional to install/update all of them."
+    return 0
+  fi
+
+  case "$mode" in
+    all)
+      ensure_manifest_tools 1 fzf bat eza rg ya yazi zellij
+      ;;
+    individual)
+      ensure_manifest_tools 0 fzf bat eza rg ya yazi zellij
+      ;;
+    none)
+      log "Skipping all optional tools at user request"
+      ;;
+  esac
 }
 
 ensure_fish() {
-  [[ $INSTALL_FISH == 1 ]] || return 0
-  ensure_manifest_tools 1 fish
+  if [[ $INSTALL_FISH == 1 ]]; then
+    ensure_manifest_tools 1 fish
+    return 0
+  fi
+
+  if ! has_prompt_tty; then
+    log "No interactive terminal; skipping Fish. Use --install-fish to install/update it without prompting."
+    return 0
+  fi
+
+  ensure_manifest_tools 0 fish
 }
 
 # ---------------------------------------------------------------------------
