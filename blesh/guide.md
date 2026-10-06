@@ -57,7 +57,7 @@ rm -rf "$test_dir"
 
 1. Create a new GitHub release in `tychart/linuxstuff` with a new release tag.
 2. Upload `blesh.tar.gz` to that release.
-3. Run `setupconfig.sh --install-optional` on a test machine, or answer yes to
+3. Run `./setupconfig/setupconfig.sh --install-optional` on a test machine, or answer yes to
    its blesh prompt during a normal interactive run.
 4. Start a new interactive shell and check:
 
