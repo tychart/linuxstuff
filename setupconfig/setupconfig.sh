@@ -1025,6 +1025,30 @@ has_prompt_tty() {
   [[ -t 0 ]] || ( exec 3< /dev/tty ) 2>/dev/null
 }
 
+prompt_optional_tool_mode() {
+  local reply=''
+
+  if [[ -t 0 ]]; then
+    printf '\n[setup] Install optional tools? [Y]es all, [N]o, [S]elect individually: ' >&2
+    IFS= read -r reply || return 1
+  elif ( exec 3< /dev/tty ) 2>/dev/null; then
+    printf '\n[setup] Install optional tools? [Y]es all, [N]o, [S]elect individually: ' >&2
+    IFS= read -r reply < /dev/tty || return 1
+  else
+    return 1
+  fi
+
+  case "$reply" in
+    y|Y|yes|YES|all|ALL) printf 'all' ;;
+    n|N|no|NO|none|NONE|'') printf 'none' ;;
+    s|S|select|SELECT|individual|INDIVIDUAL) printf 'individual' ;;
+    *)
+      printf '[setup] Please answer Y (all), N (none), or S (select individually).\n' >&2
+      prompt_optional_tool_mode
+      ;;
+  esac
+}
+
 # Portable scripts are not optional: they are repository-managed source and are
 # synchronized even on ARM, Darwin, Termux, and unsupported platforms.
 ensure_nice_to_haves() {
