@@ -559,6 +559,24 @@ platform_arch() {
   normalize_arch "$(uname -m 2>/dev/null || printf unknown)"
 }
 
+release_tag_from_github_redirect() {
+  local repository="$1"
+  local latest_url="https://github.com/${repository}/releases/latest"
+  local final_url
+  local tag
+
+  final_url="$(curl -fsSL --max-time 30 -o /dev/null -w '%{url_effective}' "$latest_url" 2>/dev/null)" || return 1
+  case "$final_url" in
+    */releases/tag/*) tag="${final_url##*/releases/tag/}" ;;
+    *) return 1 ;;
+  esac
+
+  case "$tag" in
+    ''|*[!A-Za-z0-9._/@+-]*) return 1 ;;
+  esac
+  printf '%s' "$tag"
+}
+
 release_tag_for_repo() {
   local repository="$1"
   local api_url="https://api.github.com/repos/${repository}/releases/latest"
@@ -575,13 +593,20 @@ release_tag_for_repo() {
 
   response="$(mktemp)"
   register_temp_file "$response"
-  if ! curl -fsSL --retry 3 --max-time 30 -sS -o "$response" "$api_url"; then
-    rm -f "$response"
-    return 1
+  if curl -fsSL --retry 3 --max-time 30 -sS -o "$response" "$api_url"; then
+    tag="$(awk -F '"' '/"tag_name"/ { print $4; exit }' "$response")"
+  else
+    tag=''
+  fi
+  rm -f "$response"
+
+  # GitHub's API can be rate-limited or temporarily unavailable. The normal
+  # releases/latest page redirects to the same stable tag without consuming
+  # the REST API quota, so use it as a fallback before giving up.
+  if [[ -z $tag ]]; then
+    tag="$(release_tag_from_github_redirect "$repository" 2>/dev/null)" || tag=''
   fi
 
-  tag="$(awk -F '"' '/"tag_name"/ { print $4; exit }' "$response")"
-  rm -f "$response"
   case "$tag" in
     ''|*[!A-Za-z0-9._/@+-]*) return 1 ;;
   esac
