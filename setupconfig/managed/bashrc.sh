@@ -106,6 +106,11 @@ alias ver='cat /etc/*-release'
 alias vim='vim -u "$HOME/.vimrc"'
 alias whoson='last -w | tac'
 alias details='get_machine_info'
+
+setupconfig() {
+  curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig/setupconfig.sh | bash -s -- "$@"
+}
+
 if command -v zellij >/dev/null 2>&1; then
   alias z='zellij attach -c main'
 fi

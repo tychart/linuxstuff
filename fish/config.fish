@@ -88,6 +88,10 @@ abbr --add ver 'cat /etc/*-release'
 abbr --add whoson 'last -w | tac'
 abbr --add details get_machine_info
 
+function setupconfig --description 'Run the remote setupconfig bootstrap'
+    command curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig/setupconfig.sh | command bash -s -- $argv
+end
+
 # Launch a throwaway, ephemeral Zellij instance"
 if command -q zellij
     abbr --add z "zellij options --session-serialization false"
