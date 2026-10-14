@@ -20,7 +20,7 @@
 #     ~/.bashrc already exists: the y()
 #     yazi wrapper, the zellij z alias, fzf keybindings/completion, and
 #     optional handoff into Fish for interactive shells when Fish is installed
-#   - Adds a tiny Fish handoff to ~/.zshrc when ~/.zshrc already exists
+#   - Adds a tiny Fish handoff to an existing ~/.zshrc on macOS
 #   - Keeps the yazi (yazi.toml, theme.toml) and zellij (config.kdl) configs
 #     under ${XDG_CONFIG_HOME:-~/.config} in sync with the repo whenever the
 #     matching tool is installed (no prompt): a changed file rotates the
@@ -222,7 +222,8 @@ Usage:
   --install-optional   install/update all seven non-Fish compiled tools
                        without prompting; only matching OS/architectures run
   --install-fish       install/update Fish from its matching release asset
-                       into ~/.local/bin without prompting
+                       into ~/.local/bin without prompting; unsupported
+                       platforms are skipped with a warning
   --install-x64-binaries
                        deprecated compatibility alias for --install-optional;
                        architecture matching is still enforced
@@ -1063,6 +1064,11 @@ ensure_fish() {
   fi
 
   ensure_manifest_tools 0 single fish
+
+  if [[ $(platform_os) == Darwin ]] && ! command -v fish >/dev/null 2>&1; then
+    log "Fish has no supported standalone macOS release asset; skipping installation"
+    log "Install it separately if desired: brew install fish (or use the official installer at https://fishshell.com)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1312,7 +1318,11 @@ mkdir -p "$VIM_PLUGIN_DIR" "$VIM_UNDO_DIR"
 upsert_existing_managed_block "$PROFILE_FILE" "profile" "$PROFILE_CONTENT"
 upsert_existing_managed_block "$BASH_PROFILE_FILE" "bash_profile" "$BASH_PROFILE_CONTENT"
 upsert_existing_managed_block "$BASHRC_FILE" "bashrc" "$BASHRC_CONTENT"
-upsert_existing_managed_block "$ZSHRC_FILE" "zshrc" "$ZSHRC_CONTENT"
+if [[ $(platform_os) == Darwin ]]; then
+  upsert_existing_managed_block "$ZSHRC_FILE" "zshrc" "$ZSHRC_CONTENT"
+else
+  log "Skipping managed zshrc block: Zsh handoff is only enabled on macOS"
+fi
 upsert_managed_block "$FISH_CONFIG_FILE" "fish" "$FISH_CONFIG_CONTENT"
 upsert_managed_block "$VIMRC_FILE" "vimrc" "$VIMRC_CONTENT" '"'
 upsert_managed_block "$INPUTRC_FILE" "inputrc" "$INPUTRC_CONTENT"

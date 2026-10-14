@@ -11,6 +11,9 @@ The script uses checked-out files when run from this repository. In a
 `SETUPCONFIG_REF` (default: `main`). Set `SETUPCONFIG_REF` to a tag or commit
 when reproducibility matters.
 
+On macOS, an existing `~/.zshrc` receives the Fish handoff when Fish is
+available; setupconfig does not create a new `.zshrc`.
+
 ## Release manifest
 
 The manifest is tab-separated:
@@ -48,12 +51,17 @@ Current tools remain quiet; only missing, stale, or unknown-version tools
 require a per-tool question in `S` mode.
 
 Fish is asked about separately after that decision when a matching release row
-exists. `--install-fish` installs or updates Fish without prompting. In a
-non-interactive run, optional tools and Fish are skipped unless their explicit
-flags are supplied. The portable `scripts/osc52` helper is not optional: it is
-synchronized on every setup run, including macOS, ARM, Termux, and other
-platforms without a matching compiled release row.
+exists. `--install-fish` installs or updates Fish without prompting when a
+matching release asset exists. On unsupported platforms such as macOS, the
+script skips Fish and prints an official/manual installation suggestion rather
+than invoking a system package manager. In a non-interactive run, optional
+tools and Fish are skipped unless their explicit flags are supplied. The
+portable `scripts/osc52` helper is not optional: it is synchronized on every
+setup run, including macOS, ARM, Termux, and other platforms without a matching
+compiled release row.
 
 The manifest intentionally supports several rows for one tool. This is how a
 provider can publish different archive names or members for Linux, Darwin,
-x86_64, and aarch64 without changing the installer.
+x86_64, and aarch64 without changing the installer. Fish currently has only
+Linux standalone binary rows because upstream does not publish a standalone
+macOS binary archive in the same format.
