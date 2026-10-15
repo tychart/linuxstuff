@@ -737,6 +737,7 @@ PENDING_VERSION_ARGS=()
 PENDING_ACTIONS=()
 PENDING_INSTALLED_VERSIONS=()
 PENDING_TARGET_VERSIONS=()
+PENDING_SOURCES=()
 
 reset_pending_tools() {
   PENDING_TOOL_NAMES=()
@@ -749,6 +750,7 @@ reset_pending_tools() {
   PENDING_ACTIONS=()
   PENDING_INSTALLED_VERSIONS=()
   PENDING_TARGET_VERSIONS=()
+  PENDING_SOURCES=()
 }
 
 normalize_version() {
@@ -758,6 +760,28 @@ normalize_version() {
   printf '%s\n' "$1" |
     grep -Eo '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' |
     head -n 1 || true
+}
+
+version_greater() {
+  local left="$1"
+  local right="$2"
+  local left_major left_minor left_patch
+  local right_major right_minor right_patch
+
+  IFS=. read -r left_major left_minor left_patch <<EOF
+$left
+EOF
+  IFS=. read -r right_major right_minor right_patch <<EOF
+$right
+EOF
+
+  if (( left_major != right_major )); then
+    (( left_major > right_major ))
+  elif (( left_minor != right_minor )); then
+    (( left_minor > right_minor ))
+  else
+    (( left_patch > right_patch ))
+  fi
 }
 
 read_installed_version() {
@@ -784,6 +808,44 @@ append_pending_tool() {
   PENDING_ACTIONS[$index]="$8"
   PENDING_INSTALLED_VERSIONS[$index]="$9"
   PENDING_TARGET_VERSIONS[${index}]="${10}"
+  PENDING_SOURCES[${index}]="${11}"
+}
+
+prompt_manifest_source() {
+  local tool="$1"
+  local default_index="$2"
+  local reply=''
+  local index=0
+  local source
+  local source_count=$(( $# - 2 ))
+
+  shift 2
+  printf '\n[setup] Choose the release source for %s:' "$tool" >&2
+  while [[ $# -gt 0 ]]; do
+    source="$1"
+    printf ' [%d] %s' "$((index + 1))" "$source" >&2
+    index=$((index + 1))
+    shift
+  done
+  printf ' (default: %d): ' "$((default_index + 1))" >&2
+
+  if [[ -t 0 ]]; then
+    read -r reply || reply=''
+  else
+    read -r reply < /dev/tty || reply=''
+  fi
+
+  case "$reply" in
+    ''|*[!0-9]*) printf '%s' "$default_index" ;;
+    *)
+      index=$((reply - 1))
+      if [[ $index -ge 0 && $index -lt $source_count ]]; then
+        printf '%s' "$index"
+      else
+        printf '%s' "$default_index"
+      fi
+      ;;
+  esac
 }
 
 preflight_manifest_tool() {
@@ -791,53 +853,110 @@ preflight_manifest_tool() {
   local manifest_file="$2"
   local target_os="$3"
   local target_arch="$4"
-  local row_tool row_repo row_os row_arch row_asset row_format row_member row_version_arg
+  local auto_install="$5"
+  local row_tool row_repo row_os row_arch row_asset row_format row_member row_version_arg row_source
   local tag target_version installed_version action destination
-  local found=0
+  local found=0 candidate_count=0 selected_index=0 highest_index=0 i
+  local highest_version candidate_version
+  local candidate_repos=() candidate_tags=() candidate_assets=() candidate_formats=()
+  local candidate_members=() candidate_version_args=() candidate_sources=() candidate_labels=()
 
-  while IFS="$(printf '\t')" read -r row_tool row_repo row_os row_arch row_asset row_format row_member row_version_arg; do
+  while IFS="$(printf '\t')" read -r row_tool row_repo row_os row_arch row_asset row_format row_member row_version_arg row_source; do
     [[ -z $row_tool || ${row_tool#\#} != "$row_tool" ]] && continue
     [[ $row_tool == "$tool" && $row_os == "$target_os" && $row_arch == "$target_arch" ]] || continue
     found=1
+    [[ -n $row_source ]] || row_source=official
 
     if ! tag="$(release_tag_for_repo "$row_repo")"; then
-      log "Could not resolve the latest GitHub release for $row_repo; leaving $tool unchanged"
-      return 0
+      log "Could not resolve the latest GitHub release for $row_repo; skipping this $tool source"
+      continue
     fi
     target_version="$(normalize_version "$tag")"
     if [[ -z $target_version ]]; then
-      log "Could not determine a semantic version from release tag '$tag' for $tool; leaving it unchanged"
-      return 0
+      log "Could not determine a semantic version from release tag '$tag' for $tool; skipping this source"
+      continue
     fi
 
-    destination="$NICE_TO_HAVE_BIN_DIR/$tool"
-    action=install
-    installed_version=''
-    if [[ -e $destination || -L $destination ]]; then
-      action=update
-      if is_valid_release_executable "$destination"; then
-        installed_version="$(read_installed_version "$destination" "$row_version_arg")" || installed_version=''
-      fi
-      if [[ -n $installed_version && $installed_version == "$target_version" ]]; then
-        log "$tool is current ($destination, version $installed_version)"
-        return 0
-      fi
-      [[ -n $installed_version ]] || installed_version='unknown'
-    fi
-
-    append_pending_tool \
-      "$row_tool" "$row_repo" "$tag" "$row_asset" "$row_format" \
-      "$row_member" "$row_version_arg" "$action" "$installed_version" \
-      "$target_version"
-    return 0
+    i=$candidate_count
+    candidate_repos[$i]="$row_repo"
+    candidate_tags[$i]="$tag"
+    candidate_assets[$i]="$row_asset"
+    candidate_formats[$i]="$row_format"
+    candidate_members[$i]="$row_member"
+    candidate_version_args[$i]="$row_version_arg"
+    candidate_sources[$i]="$row_source"
+    candidate_labels[$i]="$row_source (version $target_version)"
+    candidate_count=$((candidate_count + 1))
   done < "$manifest_file"
 
-  [[ $found -eq 1 ]] || log "No GitHub release asset is configured for $tool on ${target_os}/${target_arch}; skipping"
+  [[ $found -eq 1 ]] || {
+    log "No GitHub release asset is configured for $tool on ${target_os}/${target_arch}; skipping"
+    return 0
+  }
+  [[ $candidate_count -gt 0 ]] || {
+    log "No usable GitHub release source is available for $tool on ${target_os}/${target_arch}; skipping"
+    return 0
+  }
+
+  # Select the newest release across all matching sources. If versions tie,
+  # prefer a non-official source, but only after determining that an action is
+  # actually needed do we ask the interactive user to choose a source.
+  highest_index=0
+  highest_version="$(normalize_version "${candidate_tags[0]}")"
+  for ((i = 1; i < candidate_count; i++)); do
+    candidate_version="$(normalize_version "${candidate_tags[$i]}")"
+    if version_greater "$candidate_version" "$highest_version"; then
+      highest_index=$i
+      highest_version="$candidate_version"
+    fi
+  done
+  selected_index=$highest_index
+  for ((i = 0; i < candidate_count; i++)); do
+    candidate_version="$(normalize_version "${candidate_tags[$i]}")"
+    if [[ $candidate_version == "$highest_version" && ${candidate_sources[$i]} != official ]]; then
+      selected_index=$i
+      break
+    fi
+  done
+
+  destination="$NICE_TO_HAVE_BIN_DIR/$tool"
+  action=install
+  installed_version=''
+  if [[ -e $destination || -L $destination ]]; then
+    action=update
+    if is_valid_release_executable "$destination"; then
+      installed_version="$(read_installed_version "$destination" "${candidate_version_args[$selected_index]}")" || installed_version=''
+    fi
+  fi
+
+  # A source choice is relevant only when the installed binary is absent,
+  # invalid, or older than at least one available release.
+  if [[ -n $installed_version ]] && ! version_greater "$highest_version" "$installed_version"; then
+    log "$tool is current ($destination, version $installed_version)"
+    return 0
+  fi
+  [[ -n $installed_version ]] || [[ $action == install ]] || installed_version='unknown'
+
+  if [[ $candidate_count -gt 1 && $auto_install -ne 1 ]] && has_prompt_tty; then
+    selected_index="$(prompt_manifest_source "$tool" "$selected_index" "${candidate_labels[@]}")"
+    candidate_version="$(normalize_version "${candidate_tags[$selected_index]}")"
+    if [[ -n $installed_version ]] && ! version_greater "$candidate_version" "$installed_version"; then
+      log "$tool is current ($destination, version $installed_version; source ${candidate_sources[$selected_index]})"
+      return 0
+    fi
+  fi
+
+  append_pending_tool \
+    "$tool" "${candidate_repos[$selected_index]}" "${candidate_tags[$selected_index]}" \
+    "${candidate_assets[$selected_index]}" "${candidate_formats[$selected_index]}" \
+    "${candidate_members[$selected_index]}" "${candidate_version_args[$selected_index]}" \
+    "$action" "${installed_version:-unknown}" "$(normalize_version "${candidate_tags[$selected_index]}")" \
+    "${candidate_sources[$selected_index]}"
 }
 
 print_pending_summary() {
   local i=0
-  local action tool installed target
+  local action tool installed target source
 
   [[ ${#PENDING_TOOL_NAMES[@]} -gt 0 ]] || return 0
   log "Optional tools needing action:"
@@ -846,10 +965,11 @@ print_pending_summary() {
     tool="${PENDING_TOOL_NAMES[$i]}"
     installed="${PENDING_INSTALLED_VERSIONS[$i]}"
     target="${PENDING_TARGET_VERSIONS[$i]}"
+    source="${PENDING_SOURCES[$i]}"
     if [[ $action == install ]]; then
-      log "  Install $tool $target"
+      log "  Install $tool $target (source: $source)"
     else
-      log "  Update $tool ${installed} -> ${target}"
+      log "  Update $tool ${installed} -> ${target} (source: $source)"
     fi
     i=$((i + 1))
   done
@@ -882,6 +1002,7 @@ install_pending_tool() {
   local version_argument="${PENDING_VERSION_ARGS[$index]}"
   local action="${PENDING_ACTIONS[$index]}"
   local target_version="${PENDING_TARGET_VERSIONS[$index]}"
+  local source="${PENDING_SOURCES[$index]}"
   local asset member url destination
   local asset_tmp candidate candidate_output candidate_version
   local version version_output action_label
@@ -926,7 +1047,7 @@ install_pending_tool() {
   else
     action_label=Updated
   fi
-  log "$action_label $tool -> $destination (${version:-$target_version}; release $tag)"
+  log "$action_label $tool -> $destination (${version:-$target_version}; release $tag; source $source)"
 }
 
 ensure_manifest_tools() {
@@ -957,7 +1078,7 @@ ensure_manifest_tools() {
   register_temp_file "$GITHUB_TAG_CACHE"
 
   for tool in "$@"; do
-    preflight_manifest_tool "$tool" "$manifest_file" "$os" "$arch"
+    preflight_manifest_tool "$tool" "$manifest_file" "$os" "$arch" "$auto_install"
   done
 
   if [[ ${#PENDING_TOOL_NAMES[@]} -eq 0 ]]; then

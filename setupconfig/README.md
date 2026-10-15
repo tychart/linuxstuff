@@ -19,12 +19,16 @@ available; setupconfig does not create a new `.zshrc`.
 The manifest is tab-separated:
 
 ```text
-tool  repository  os  arch  asset-template  format  archive-member  version-argument
+tool  repository  os  arch  asset-template  format  archive-member  version-argument  source
 ```
 
 `{tag}`, `{version}`, and normalized `{arch}` in the asset/member fields are
-replaced from the upstream GitHub `releases/latest` tag and selected platform.
-`format` is `raw`, `tar`, or `zip`.
+replaced from the GitHub `releases/latest` tag and selected platform. `format`
+is `raw`, `tar`, or `zip`. The `source` column identifies the provider;
+maintained rows use `official` or a custom fork label. Matching sources are
+compared by release version, and the newest is preferred. Interactive installs
+ask which source to use only when an install or update is actually needed. The
+same asset and version format is used for all sources.
 Archive members are exact names and are extracted into a private temporary
 candidate before validation. Unsafe member names are rejected.
 
@@ -62,6 +66,9 @@ compiled release row.
 
 The manifest intentionally supports several rows for one tool. This is how a
 provider can publish different archive names or members for Linux, Darwin,
-x86_64, and aarch64 without changing the installer. Fish currently has only
-Linux standalone binary rows because upstream does not publish a standalone
-macOS binary archive in the same format.
+x86_64, and aarch64 without changing the installer. Add a second row with the
+same tool, OS, and architecture plus a custom `source` label to use a
+compatible fork for only that platform. Fish currently has only Linux
+standalone binary rows
+because upstream does not publish a standalone macOS binary archive in the same
+format.
