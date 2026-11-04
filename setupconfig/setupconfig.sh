@@ -8,6 +8,14 @@
 #
 # Behavior:
 #   - Updates clearly marked managed blocks inside standard dotfiles
+#   - Defines every environment variable, PATH included, once in
+#     ~/.config/setupconfig/env.sh and sources it from Bash, POSIX sh, Zsh, and
+#     Fish. The file holds plain `export NAME=value` lines only, because Fish
+#     parses it directly instead of keeping a second copy of the values.
+#   - Creates the blocks listed in ALWAYS_CREATE_BLOCKS when their file is
+#     missing: the shared env file, ~/.bash_profile, ~/.bashrc, the Fish config,
+#     ~/.vimrc, and ~/.inputrc. Blocks for shells setupconfig does not otherwise
+#     configure (profile, zshrc) are only edited when the file already exists
 #   - Preserves user content outside those managed blocks
 #   - Installs the OSC 52 Vim plugin as ~/.vim/plugin/oscyank.vim
 #   - Synchronizes the portable scripts under scripts/ on every run.
@@ -20,7 +28,8 @@
 #     ~/.bashrc already exists: the y()
 #     yazi wrapper, the zellij z alias, fzf keybindings/completion, and
 #     optional handoff into Fish for interactive shells when Fish is installed
-#   - Adds a tiny Fish handoff to an existing ~/.zshrc on macOS
+#   - Sources the shared environment from an existing ~/.zshrc and hands
+#     interactive Zsh over to Fish, like ~/.bashrc; no new Zsh config is created
 #   - Keeps the yazi (yazi.toml, theme.toml) and zellij (config.kdl) configs
 #     under ${XDG_CONFIG_HOME:-~/.config} in sync with the repo whenever the
 #     matching tool is installed (no prompt): a changed file rotates the
@@ -49,7 +58,8 @@ set -euo pipefail
 
 SCRIPT_TAG="setupconfig"
 readonly SCRIPT_TAG
-# Single source of truth for the preferred editor written into ~/.profile.
+# Single source of truth for the preferred editor written into the shared
+# environment file.
 DEFAULT_EDITOR="vim"
 readonly DEFAULT_EDITOR
 
@@ -104,12 +114,25 @@ ZSHRC_FILE="$HOME/.zshrc"
 VIMRC_FILE="$HOME/.vimrc"
 INPUTRC_FILE="$HOME/.inputrc"
 FISH_CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
+# Shared environment file, read by every shell. Kept at one fixed path so the
+# managed blocks never have to guess where it lives.
+ENV_FILE="$HOME/.config/setupconfig/env.sh"
 VIM_DIR="$HOME/.vim"
 VIM_PLUGIN_DIR="$VIM_DIR/plugin"
 VIM_UNDO_DIR="$VIM_DIR/undodir"
 OSCYANK_FILE="$VIM_PLUGIN_DIR/oscyank.vim"
 readonly PROFILE_FILE BASH_PROFILE_FILE BASHRC_FILE ZSHRC_FILE VIMRC_FILE INPUTRC_FILE FISH_CONFIG_FILE
+readonly ENV_FILE
 readonly VIM_DIR VIM_PLUGIN_DIR VIM_UNDO_DIR OSCYANK_FILE
+
+# Managed blocks that may be created when their target file is missing: the
+# shells and files setupconfig drives itself. Anything not listed here (profile,
+# zshrc) is a file setupconfig never creates, because it belongs to a shell or a
+# login path it does not own (Zsh, POSIX sh/dash); its block is only added when
+# the file already exists. Add a name here to opt a new block into
+# create-if-missing.
+ALWAYS_CREATE_BLOCKS=(env bash_profile bashrc fish vimrc inputrc)
+readonly ALWAYS_CREATE_BLOCKS
 
 # --install-optional selects all seven non-Fish compiled tools without
 # prompting. Interactive runs otherwise offer All, None, or the existing
@@ -266,6 +289,7 @@ upsert_managed_block() {
   local name="$2"
   local content="$3"
   local marker_prefix="${4:-#}"
+  local file_existed=0
   local start_marker="${marker_prefix} >>> ${SCRIPT_TAG}:${name} >>>"
   local end_marker="${marker_prefix} <<< ${SCRIPT_TAG}:${name} <<<"
   # Also recognize the alternate comment prefix used by other managed files.
@@ -276,6 +300,10 @@ upsert_managed_block() {
   local tmp
   local preserved_tmp
   local first_preserved_line=''
+
+  if [[ -f $file ]]; then
+    file_existed=1
+  fi
 
   mkdir -p "$(dirname "$file")"
   tmp="$(mktemp)"
@@ -319,14 +347,35 @@ upsert_managed_block() {
 
   mv "$tmp" "$file"
   rm -f "$preserved_tmp"
-  log "Updated managed block '$name' in $file"
+  if [[ $file_existed -eq 0 ]]; then
+    log "Created managed block '$name' in $file"
+  else
+    log "Updated managed block '$name' in $file"
+  fi
 }
 
-upsert_existing_managed_block() {
+managed_block_should_create() {
+  local want="$1"
+  local name
+
+  # Bash 3.2 treats an empty array expansion as unset under set -u.
+  if [[ ${#ALWAYS_CREATE_BLOCKS[@]} -eq 0 ]]; then
+    return 1
+  fi
+
+  for name in "${ALWAYS_CREATE_BLOCKS[@]}"; do
+    [[ $name == "$want" ]] && return 0
+  done
+  return 1
+}
+
+# Apply a managed block, creating the file and its parent directories (for
+# example ~/.config/fish) only for blocks listed in ALWAYS_CREATE_BLOCKS.
+apply_managed_block() {
   local file="$1"
   local name="$2"
 
-  if [[ ! -e $file ]]; then
+  if [[ ! -e $file ]] && ! managed_block_should_create "$name"; then
     log "Skipping managed block '$name': $file does not exist"
     return 0
   fi
@@ -1215,8 +1264,8 @@ tool_is_present() {
   local tool="$1"
 
   # Covers tools just installed by this script into ~/.local/bin (which may
-  # not be on PATH until a new shell sources ~/.profile) and tools found on
-  # PATH.
+  # not be on PATH until a new shell sources the shared environment) and tools
+  # found on PATH.
   [[ -x "$NICE_TO_HAVE_BIN_DIR/$tool" ]] || command -v "$tool" >/dev/null 2>&1
 }
 
@@ -1325,7 +1374,8 @@ ensure_tokyo_night_flavor() {
   fi
 
   # Prefer the ya this script installs into ~/.local/bin (which may not be on
-  # PATH until a new shell sources ~/.profile); fall back to any ya on PATH.
+  # PATH until a new shell sources the shared environment); fall back to any ya
+  # on PATH.
   if [[ -x "$NICE_TO_HAVE_BIN_DIR/ya" ]]; then
     ya_bin="$NICE_TO_HAVE_BIN_DIR/ya"
   else
@@ -1411,21 +1461,21 @@ else
   log "No known system Bash rc for this OS; leaving any existing ~/.bashrc fully self-managed"
 fi
 
+load_repo_content ENV_CONTENT "setupconfig/managed/env.sh"
+ENV_CONTENT="${ENV_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
+
 load_repo_content PROFILE_CONTENT "setupconfig/managed/profile.sh"
-PROFILE_CONTENT="${PROFILE_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 
 load_repo_content BASH_PROFILE_CONTENT "setupconfig/managed/bash_profile.sh"
 
 load_repo_content ZSHRC_CONTENT "setupconfig/managed/zshrc.sh"
 
 load_repo_content BASHRC_CONTENT "setupconfig/managed/bashrc.sh"
-BASHRC_CONTENT="${BASHRC_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 BASHRC_CONTENT="${BASHRC_CONTENT/__SYSTEM_BASHRC_BLOCK__/$SYSTEM_BASHRC_BLOCK}"
 
 load_repo_content VIMRC_CONTENT "setupconfig/managed/vimrc.vim"
 
 load_repo_content FISH_CONFIG_CONTENT "fish/config.fish"
-FISH_CONFIG_CONTENT="${FISH_CONFIG_CONTENT//__DEFAULT_EDITOR__/$DEFAULT_EDITOR}"
 
 load_repo_content INPUTRC_CONTENT "setupconfig/managed/inputrc"
 
@@ -1436,22 +1486,20 @@ load_repo_content OSCYANK_PLUGIN_CONTENT "setupconfig/files/oscyank.vim"
 log "Applying managed configuration blocks"
 mkdir -p "$VIM_PLUGIN_DIR" "$VIM_UNDO_DIR"
 
-upsert_existing_managed_block "$PROFILE_FILE" "profile" "$PROFILE_CONTENT"
-upsert_existing_managed_block "$BASH_PROFILE_FILE" "bash_profile" "$BASH_PROFILE_CONTENT"
-upsert_existing_managed_block "$BASHRC_FILE" "bashrc" "$BASHRC_CONTENT"
-if [[ $(platform_os) == Darwin ]]; then
-  upsert_existing_managed_block "$ZSHRC_FILE" "zshrc" "$ZSHRC_CONTENT"
-else
-  log "Skipping managed zshrc block: Zsh handoff is only enabled on macOS"
-fi
-upsert_managed_block "$FISH_CONFIG_FILE" "fish" "$FISH_CONFIG_CONTENT"
-upsert_managed_block "$VIMRC_FILE" "vimrc" "$VIMRC_CONTENT" '"'
-upsert_managed_block "$INPUTRC_FILE" "inputrc" "$INPUTRC_CONTENT"
+apply_managed_block "$ENV_FILE" "env" "$ENV_CONTENT"
+apply_managed_block "$PROFILE_FILE" "profile" "$PROFILE_CONTENT"
+apply_managed_block "$BASH_PROFILE_FILE" "bash_profile" "$BASH_PROFILE_CONTENT"
+apply_managed_block "$BASHRC_FILE" "bashrc" "$BASHRC_CONTENT"
+apply_managed_block "$ZSHRC_FILE" "zshrc" "$ZSHRC_CONTENT"
+apply_managed_block "$FISH_CONFIG_FILE" "fish" "$FISH_CONFIG_CONTENT"
+apply_managed_block "$VIMRC_FILE" "vimrc" "$VIMRC_CONTENT" '"'
+apply_managed_block "$INPUTRC_FILE" "inputrc" "$INPUTRC_CONTENT"
 write_managed_file "$OSCYANK_FILE" "$OSCYANK_PLUGIN_CONTENT"
 
 if command -v git >/dev/null 2>&1; then
   log "Updating Git defaults"
-  # Remove a hardcoded Git editor so Git inherits $EDITOR from ~/.profile.
+  # Remove a hardcoded Git editor so Git inherits $EDITOR from the shared
+  # environment.
   git config --global --unset-all core.editor >/dev/null 2>&1 || true
   git config --global init.defaultBranch main
   git config --global alias.lg "log --graph --all --decorate --pretty=format:'%C(blue)%h%Creset%C(yellow)%d%Creset %s %C(blue)%an%Creset %C(green)(%ar)%Creset'"

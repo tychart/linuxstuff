@@ -1,47 +1,12 @@
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-
-# Preserve inherited values when they already exist.
-if not set -q EDITOR
-    set -gx EDITOR __DEFAULT_EDITOR__
-end
-
-if not set -q VISUAL
-    set -gx VISUAL $EDITOR
-end
-
-if not set -q SYSTEMD_EDITOR
-    set -gx SYSTEMD_EDITOR $EDITOR
-end
-
-# Prefer user-local executable directories. Use fish_add_path when available,
-# but keep a portable fallback for older Fish builds.
-if functions -q fish_add_path
-    fish_add_path --path --move "$HOME/bin"
-    fish_add_path --path --move "$HOME/.local/bin"
-else
-    for dir in "$HOME/bin" "$HOME/.local/bin"
-        if test -d "$dir"
-            if not contains -- "$dir" $PATH
-                set -gx PATH "$dir" $PATH
-            end
-        end
-    end
-end
-
-# Bun: only configure it when installed, so shells that do not use Bun pay
-# almost no startup cost.
-if test -d "$HOME/.bun"
-    set -gx BUN_INSTALL "$HOME/.bun"
-
-    if test -d "$BUN_INSTALL/bin"
-        if functions -q fish_add_path
-            fish_add_path --path --move "$BUN_INSTALL/bin"
-        else if not contains -- "$BUN_INSTALL/bin" $PATH
-            set -gx PATH "$BUN_INSTALL/bin" $PATH
-        end
-    end
+# One shared file defines every exported variable, including PATH, for Bash,
+# POSIX sh, Zsh, and Fish. It contains only `export NAME=value` lines, which
+# Fish parses natively, so no generated Fish copy is needed. Its marker line
+# means a shell that already inherited the values does not repeat them.
+if test -z "$SETUPCONFIG_ENV_LOADED"; and test -r "$HOME/.config/setupconfig/env.sh"
+    source "$HOME/.config/setupconfig/env.sh"
 end
 
 # Everything below is only needed in an interactive shell.
@@ -98,8 +63,9 @@ if command -q zellij
 end
 
 
-# Reload Fish configuration.
-abbr --add src 'source "$__fish_config_dir/config.fish"'
+# Reload Fish configuration. Clear the environment marker first so the shared
+# env file is read again instead of being skipped as already loaded.
+abbr --add src 'set -e SETUPCONFIG_ENV_LOADED 2>/dev/null; source "$__fish_config_dir/config.fish"'
 
 # Python venvs provide a Fish-specific activation script.
 abbr --add venv 'source .venv/bin/activate.fish'
@@ -184,6 +150,14 @@ function get_os_short --description 'Print short OS identifier'
     end
 
     printf '%s%s' "$os_id" "$os_version"
+end
+
+# Start Bash without the automatic handoff to Fish from ~/.bashrc. Everything
+# else in the Bash setup still applies. SETUPCONFIG_NO_FISH is exported, so a
+# nested `bash` inside that session also stays in Bash.
+function bashonly --description 'Start Bash without the automatic handoff to Fish'
+    set -lx SETUPCONFIG_NO_FISH 1
+    command bash $argv
 end
 
 function ssu --description 'Open root Fish shell using current user config and history'

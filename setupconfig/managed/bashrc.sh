@@ -1,34 +1,24 @@
-# Editor defaults should exist before any early return so child CLI tools inherit them.
-export EDITOR="${EDITOR:-__DEFAULT_EDITOR__}"
-export VISUAL="${VISUAL:-$EDITOR}"
+# Distro interactive defaults first: they may prepend system directories (Fedora
+# prepends /usr/lib64/ccache), and the shared environment must end up in front
+# of anything they add.
+__SYSTEM_BASHRC_BLOCK__
+
+# Shared environment: one file, the same values in every shell. The marker in
+# that file keeps repeated sources (the distro file below, user startup files,
+# and nested shells) from repeating the PATH entries.
+if [ -z "${SETUPCONFIG_ENV_LOADED:-}" ] && [ -r "$HOME/.config/setupconfig/env.sh" ]; then
+  . "$HOME/.config/setupconfig/env.sh"
+fi
 
 # Stop here for non-interactive shells.
 [[ $- == *i* ]] || return
 
-# ~/.profile sources this file back, both in its managed block and in
-# preserved user content. If we are already inside such a source, stop:
-# everything below was already defined by the outer pass. Without this the
-# two files would source each other forever and every shell would hang.
-if [ -n "${__SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC:-}" ]; then
-  return
-fi
-
-__SYSTEM_BASHRC_BLOCK__
-# Many terminals start Bash as a non-login shell, which skips ~/.profile.
-# Source it here so PATH and editor defaults are consistent in every shell.
-# The guard prevents recursion because ~/.profile sources this file back.
-if [ -r "$HOME/.profile" ]; then
-  __SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC=1
-  . "$HOME/.profile"
-  unset __SETUPCONFIG_SOURCING_PROFILE_FROM_BASHRC
-fi
-
-# Prefer Fish for interactive work when it is installed.
-if [ -z "${FISH_VERSION:-}" ] && command -v fish >/dev/null 2>&1; then
+# Prefer Fish for interactive work when it is installed, unless the caller asked
+# for real Bash: the Fish `bashonly` helper exports SETUPCONFIG_NO_FISH. Because
+# that variable is exported, nested `bash` calls stay in Bash too.
+if [ -z "${FISH_VERSION:-}" ] && [ -z "${SETUPCONFIG_NO_FISH:-}" ] && command -v fish >/dev/null 2>&1; then
   exec "$(command -v fish)"
 fi
-
-export INPUTRC="${INPUTRC:-$HOME/.inputrc}"
 
 # History behavior.
 HISTCONTROL=ignoredups:erasedups
@@ -100,7 +90,7 @@ alias .....='cd ../../../..'
 alias c='clear'
 alias k='kubectl'
 alias myip='hostname -I 2>/dev/null | awk "{print \$1}"'
-alias src='source "$HOME/.profile"'
+alias src='source "$HOME/.config/setupconfig/env.sh"'
 alias venv='source .venv/bin/activate'
 alias ver='cat /etc/*-release'
 alias vim='vim -u "$HOME/.vimrc"'

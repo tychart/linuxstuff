@@ -16,8 +16,62 @@ The script uses checked-out files when run from this repository. In a
 `SETUPCONFIG_REF` (default: `main`). Set `SETUPCONFIG_REF` to a tag or commit
 when reproducibility matters.
 
-On macOS, an existing `~/.zshrc` receives the Fish handoff when Fish is
-available; setupconfig does not create a new `.zshrc`.
+Every exported variable, PATH included, lives in exactly one managed file:
+`~/.config/setupconfig/env.sh`. **Add your own variables there** — in
+`setupconfig/managed/env.sh` (the repo copy) or just below the managed block in
+`~/.config/setupconfig/env.sh`, where reruns preserve them. Do not add exports
+to `~/.profile`, `~/.bashrc`, or the Fish config: each of those is read by only
+some shells, so the value silently reaches some sessions and not others.
+
+Shell startup files only source that one file: `~/.bashrc` (every Bash shell,
+reached from `~/.bash_profile` for login shells), `~/.profile` (POSIX sh and
+dash, when that file exists), and
+`${XDG_CONFIG_HOME:-~/.config}/fish/config.fish` (Fish). An existing `~/.zshrc`
+gets the same source line plus the same Fish handoff as `~/.bashrc`. No shell
+keeps its own copy of the values.
+
+Bash login shells follow `~/.bash_profile`, so they never read `~/.profile`.
+Put exports in the shared environment file, not in `~/.profile`: that file is
+the POSIX entry point for sh and dash, and its managed block does nothing else.
+
+Fish parses the environment file directly, so it must stay limited to plain
+`export NAME=value` lines. Fish cannot parse `if`, `[[ ]]`,
+`${NAME:-default}`, functions, or bare `PATH=...` assignments; anything needing
+logic belongs in that shell's own block instead. `export PATH="...:$PATH"`
+does work in Fish, which splits and rejoins PATH as a list.
+
+The environment is sourced once per shell, so the PATH entries appear once.
+Inside `~/.bashrc` the distro file (`/etc/bashrc`, `/etc/bash.bashrc`) is
+sourced first, because distros prepend system directories there (Fedora adds
+`/usr/lib64/ccache`) and `~/.local/bin` has to stay in front of them.
+
+Managed blocks are created when their file is missing only if they are listed
+in `ALWAYS_CREATE_BLOCKS`: the shared `env` file, `~/.bash_profile`,
+`~/.bashrc`, the Fish config, `~/.vimrc`, and `~/.inputrc`. Those are the shells
+and files setupconfig drives itself; `~/.bash_profile` is what makes Bash login
+behave the same on Fedora, RHEL, Ubuntu, and macOS.
+
+`~/.profile` and `~/.zshrc` are handled the other way round: the block is added
+when the file already exists and nothing is created, because they belong to a
+login path setupconfig does not own (POSIX sh/dash) or to the user's own Zsh
+config. A fresh install therefore has no `~/.profile`; it is not needed by Bash
+or Fish, and a default Ubuntu install already has one and gets the block.
+
+## Staying in Bash or Zsh
+
+`~/.bashrc` and `~/.zshrc` hand an interactive shell over to Fish when Fish is
+installed. To stay in the shell that was started, run the Fish helper
+`bashonly`, or set the same variable yourself:
+
+```fish
+bashonly                     # Bash with aliases, prompt, history, the lot
+bashonly -l                  # same, as a login shell
+env SETUPCONFIG_NO_FISH=1 zsh   # Zsh, no handoff
+SETUPCONFIG_NO_FISH=1 bash      # equivalent, from Bash
+```
+
+The variable is exported, so nested `bash` calls inside that session stay in
+Bash as well.
 
 ## Release manifest
 

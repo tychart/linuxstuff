@@ -1,11 +1,12 @@
-# Prefer Fish for interactive Zsh work when it is installed.
-# This stays tiny on purpose: the full shell setup lives in Fish/Bash config,
-# and missing Fish should never break Zsh startup. `command -v` is evaluated
-# by Zsh after its normal startup files have populated PATH.
-if [[ -o interactive ]] && [[ -z "${FISH_VERSION:-}" ]]; then
-  __setupconfig_fish="$(command -v fish 2>/dev/null || true)"
-  if [[ -n "$__setupconfig_fish" ]]; then
-    exec "$__setupconfig_fish"
-  fi
-  unset __setupconfig_fish
+# Environment variables come from the one shared file that Bash, POSIX sh,
+# and Fish also read. Zsh's own interactive setup stays untouched.
+if [ -z "${SETUPCONFIG_ENV_LOADED:-}" ] && [ -r "$HOME/.config/setupconfig/env.sh" ]; then
+  . "$HOME/.config/setupconfig/env.sh"
+fi
+
+# Prefer Fish for interactive work when it is installed, exactly like ~/.bashrc.
+# ~/.zshrc is only read by interactive shells, so no interactivity test is
+# needed here. SETUPCONFIG_NO_FISH keeps the current shell, as it does for Bash.
+if [ -z "${FISH_VERSION:-}" ] && [ -z "${SETUPCONFIG_NO_FISH:-}" ] && command -v fish >/dev/null 2>&1; then
+  exec "$(command -v fish)"
 fi
