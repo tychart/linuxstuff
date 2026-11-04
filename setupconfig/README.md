@@ -1,5 +1,10 @@
 # setupconfig sources
 
+Quick copy and paste command:
+```bash
+curl -fsSL https://raw.githubusercontent.com/tychart/linuxstuff/main/setupconfig/setupconfig.sh | bash
+```
+
 `setupconfig/setupconfig.sh` treats this directory as repository-managed input.
 
 - `managed/` contains fragments inserted into marked blocks in user dotfiles.
