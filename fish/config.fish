@@ -60,10 +60,10 @@ end
 # ---------------------------------------------------------------------------
 
 if command -q eza
-    abbr --add ll 'eza -lag --git --icons --group-directories-first'
+    alias ll 'eza -laag --git --icons --group-directories-first'
 else
     # Portable fallback for systems whose ls does not support GNU color/grouping flags.
-    abbr --add ll 'ls -lah'
+    alias ll 'ls -lah'
 end
 
 if command -q bat
