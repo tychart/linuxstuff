@@ -235,7 +235,7 @@ $ busctl --user get-property org.freedesktop.secrets \
     org.freedesktop.Secret.Collection Locked
 b false
 
-$ ~/biopass/selinux/verify-keyring.sh    # Locked=false, no warnings, ssh OK
+$ biopass/selinux/verify-keyring.sh    # Locked=false, no warnings, ssh OK
 ```
 
 Confirmed after a full reboot: biometric login, keyring already unlocked, and SSH keys stored in the keyring usable immediately.

@@ -1,53 +1,75 @@
-# biopass + oo7: keyring not unlocked at login (SELinux)
+# Biopass + oo7: login keyring stays locked (SELinux)
 
-Symptom: after a biopass (face/fingerprint) login the login keyring is locked,
-so Chromium/Obsidian/seahorse prompt for the keyring password, and
-gcr-ssh-agent cannot fetch stored SSH passphrases.
+Local SELinux policy needed for `biopass`'s "Keyring Unlock" feature on Fedora
+(RHEL family) with SELinux enforcing. See the parent notes:
+[Fedora45-Install-Notes.md](../Fedora45-Install-Notes.md#selinux-policy-for-tpm--shadow).
 
-Cause: biopass unseals the login password from the TPM at auth time to feed
-PAM_AUTHTOK. The helper runs in SELinux domain xdm_t, and targeted policy has
-no rule allowing xdm_t to use tpm_device_t (/dev/tpmrm0), so it fails with
-ECDSA/"no TPM to unlock the keyring". pam_oo7 then has no AUTHTOK and
-oo7-daemon starts with the login collection locked.
+Upstream report: [phucvinh57/biopass#252](https://github.com/phucvinh57/biopass/issues/252)
 
-Evidence:
-  journalctl -b -o cat | grep -e 'avc:  denied' -e 'no TPM'
-  ~/.local/share/com.ticklab.biopass/logs/<date>.log
-  journalctl -b -o cat | grep 'PAM_AUTHTOK is null'
+## Symptom
 
-Fix: install the local policy module
-  sudo semodule -i ~/biopass-selinux/biopass_tpm.pp
-Verify (after logout/login, before opening any app):
-  busctl --user get-property org.freedesktop.secrets \
-    /org/freedesktop/secrets/collection/login \
-    org.freedesktop.Secret.Collection Locked     # want: b false
+Biometric login at GDM works, but the login keyring is still locked, so
+Chromium/Electron apps and seahorse prompt for the keyring password.
 
-Rebuild from scratch if AVCs change:
-  journalctl -b -o cat | grep 'avc:  denied' | grep biopass | audit2allow -M biopass_tpm
-  sudo semodule -i biopass_tpm.pp
+```bash
+busctl --user get-property org.freedesktop.secrets \
+  /org/freedesktop/secrets/collection/login \
+  org.freedesktop.Secret.Collection Locked      # b true = broken
+```
 
-## Round 2 (2026-11-11 19:40)
+## Cause
 
-The first module only allowed `{ read write }` (all audit2allow saw). After
-install the denial moved to `{ open }`, so the policy now allows
-`{ open read write ioctl getattr }`. Re-install:
+Biopass 1.5.1 ships no SELinux policy. Its helper runs in GDM's `xdm_t` domain
+and needs two things that Fedora's targeted policy does not allow:
 
-  sudo semodule -i ~/biopass-selinux/biopass_tpm.pp
+| Rule | Without it |
+| --- | --- |
+| `xdm_t` → `tpm_device_t:chr_file` (`/dev/tpmrm0`) | `Biopass: no TPM to unlock the keyring` + an AVC on `tpmrm0` |
+| `xdm_t` → `shadow_t:file` (`/etc/shadow`) | `Biopass: cannot check the saved keyring password (2)` = `PasswordCheck::NoLocalAccount` |
 
-No reboot needed - SELinux policy reloads immediately; just log out to GDM and
-log back in with biopass, then run ~/biopass-selinux/verify-keyring.sh.
+Either failure means `PAM_AUTHTOK` is never set, so `pam_oo7` has nothing to
+hand to `oo7-daemon` and the collection stays locked.
 
-## FINAL STATE (2026-11-11 20:06) — working
+The `shadow_t` denial is **`dontaudit`ed**, so it never shows up in
+`journalctl | grep avc` — `test-shadow.sh` probes it directly.
 
-Both modules installed; a biopass (face) login at GDM now unlocks the login
-keyring and gcr-ssh-agent unlocks ~/.ssh/homesshkey with no prompt.
+## Install
 
-  biopass_tpm.pp     allow xdm_t tpm_device_t:chr_file { open read write ioctl getattr }
-  biopass_shadow.pp  allow xdm_t shadow_t:file { getattr open read }
+```bash
+cd biopass/selinux
+for m in biopass_tpm biopass_shadow; do
+  checkmodule -M -m -o "$m.mod" "$m.te"
+  semodule_package -o "$m.pp" -m "$m.mod"
+  sudo semodule -i "$m.pp"
+done
+```
 
-Health check after any biopass / selinux-policy / oo7 update:
+No reboot required; the next login uses the new policy.
 
-  ~/biopass-selinux/verify-keyring.sh
+## Verify
 
-Expect: Locked = b false, no "no TPM"/"cannot check" lines, no AVCs, ssh OK.
-Remove the modules with:  sudo semodule -r biopass_tpm biopass_shadow
+Log out, log back in with face or fingerprint, and **do not** type the keyring
+password:
+
+```bash
+./verify-keyring.sh
+```
+
+Expect `b false`, no `no TPM` / `cannot check` warning for the current login,
+no AVCs, and `ssh OK`.
+
+```bash
+journalctl -b | grep -E 'PAM_AUTHTOK|gkr-pam'
+# Captured PAM_AUTHTOK of length N bytes
+# gkr-pam: stashed password to try later in open session
+# gkr-pam: gnome-keyring-daemon started properly and unlocked keyring
+```
+
+## Maintenance
+
+- Re-run `verify-keyring.sh` after any `biopass`, `oo7-daemon`, or
+  `selinux-policy-targeted` update.
+- Re-derive the rules if the denials change:
+  `journalctl -b -o cat | grep 'avc:  denied' | grep biopass | audit2allow -M biopass_tpm`
+- Remove once upstream (or Fedora) ships the policy:
+  `sudo semodule -r biopass_tpm biopass_shadow`
