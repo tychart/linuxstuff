@@ -1,0 +1,11 @@
+module biopass_tpm 1.0;
+
+require {
+	type xdm_t;
+	type tpm_device_t;
+	class chr_file { open read write ioctl getattr };
+}
+
+# biopass-helper (run by the biopass PAM module inside GDM's xdm_t domain)
+# must talk to the TPM to unseal the login password for the keyring / AUTHTOK.
+allow xdm_t tpm_device_t:chr_file { open read write ioctl getattr };

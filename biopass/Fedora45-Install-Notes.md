@@ -1,7 +1,7 @@
 # Biopass 1.5.1 on Fedora 45 — Framework Laptop 13
 
-**Status:** Confirmed working after reboot  
-**Date tested:** 2026-11-05  
+**Status:** Confirmed working after reboot — keyring unlock additionally requires two local SELinux policy modules (see [SELinux policy for TPM + shadow](#selinux-policy-for-tpm--shadow))  
+**Date tested:** 2026-11-05 (biometric login, PAM); keyring-unlock chain re-verified after a full reboot on 2026-11-11  
 **Hardware:** Framework Laptop 13, Goodix MOC fingerprint sensor, TPM 2.0  
 **Desktop/login manager:** GNOME 51 / GDM 51  
 **OS:** Fedora Workstation 45, upgraded from Fedora 44  
@@ -9,11 +9,12 @@
 
 ## Executive summary
 
-Biopass 1.5.1 works on a fresh Fedora 45 installation after three Fedora-specific adjustments:
+Biopass 1.5.1 works on a fresh Fedora 45 installation after four Fedora-specific adjustments:
 
 1. Install `libxcrypt-compat`, because the Biopass TPM helper requires the legacy `libcrypt.so.1` ABI.
 2. Install `gnome-keyring-pam` separately from `gnome-keyring`; Fedora 45 splits the PAM module into its own package.
 3. Integrate Biopass into GDM's PAM substack instead of changing Fedora's shared `system-auth` or `password-auth` files.
+4. Add two local SELinux policy modules so the TPM unseal and the `/etc/shadow` re-check work inside GDM's `xdm_t` domain. Without them biometric login works but the keyring silently stays locked.
 
 The final setup successfully:
 
@@ -24,6 +25,8 @@ The final setup successfully:
 - works after a complete reboot;
 - retains normal password fallback;
 - leaves `sudo`, TTY login, `su`, and other shared PAM services on Fedora's normal authselect configuration.
+
+> **Correction (2026-11-11).** An earlier revision of this document recorded keyring unlock as confirmed on 2026-11-05. That was a false positive. The biopass app log contains `Biopass: no TPM to unlock the keyring` on every day since installation (`~/.local/share/com.ticklab.biopass/logs/`), and the keyring only *appeared* unlocked because it had already been unlocked by hand earlier in that session. The actual cause was missing SELinux policy, and the fix is the section below; the full chain was re-verified after a complete reboot on 2026-11-11.
 
 ## Hardware and software verification
 
@@ -131,6 +134,122 @@ Output:
 ```text
 /usr/lib64/security/pam_gnome_keyring.so
 ```
+
+## SELinux policy for TPM + shadow
+
+### Symptom
+
+Biopass authenticated at GDM (face or fingerprint) and the session opened, but the login keyring was still locked. The first app that touched the Secret Service then prompted for the keyring password:
+
+```text
+$ busctl --user get-property org.freedesktop.secrets \
+    /org/freedesktop/secrets/collection/login \
+    org.freedesktop.Secret.Collection Locked
+b true
+```
+
+Because typing the password once per session makes everything work again, this is easy to mistake for success (see the correction at the top).
+
+### Diagnosis
+
+Biopass's keyring handoff lives in `auth/keyring/`, and after a biometric match `biopass-helper` (which runs in GDM's SELinux domain `xdm_t`) does four things: read the sealed blob, unseal it with the TPM, re-check the result against `/etc/shadow`, then write it to the PAM module, which sets `PAM_AUTHTOK`. Two of those four steps are denied by SELinux on Fedora 45, and biopass 1.5.1 ships no policy of its own.
+
+| Stage | Log evidence | Cause |
+| --- | --- | --- |
+| TPM unseal | `Biopass: no TPM to unlock the keyring` + `avc denied { open }` / `{ read write }` on `/dev/tpmrm0`, `xdm_t` → `tpm_device_t` | no policy allow |
+| shadow re-check | `Biopass: cannot check the saved keyring password (2)` | `2` = `PasswordCheck::NoLocalAccount`; `getspnam_r()` cannot read `shadow_t` from `xdm_t` |
+| PAM handoff | `pam_oo7: PAM_AUTHTOK is null (password not available)` and `gkr-pam: no password is available for user` | nothing was handed over, so the keyring cannot unlock |
+
+Note the failure mode: biometric login is unaffected, so only the keyring breaks, and the only user-visible symptom is an unrelated-looking password prompt.
+
+### Fix
+
+Two local policy modules. Save the sources from [`biopass/selinux/`](selinux/) in this repository:
+
+```text
+biopass_tpm.te
+module biopass_tpm 1.0;
+
+require {
+        type xdm_t;
+        type tpm_device_t;
+        class chr_file { open read write ioctl getattr };
+}
+
+allow xdm_t tpm_device_t:chr_file { open read write ioctl getattr };
+```
+
+```text
+biopass_shadow.te
+module biopass_shadow 1.0;
+
+require {
+        type xdm_t;
+        type shadow_t;
+        class file { getattr open read };
+}
+
+allow xdm_t shadow_t:file { getattr open read };
+```
+
+Build and install both:
+
+```bash
+cd biopass/selinux
+for m in biopass_tpm biopass_shadow; do
+  checkmodule -M -m -o "$m.mod" "$m.te"
+  semodule_package -o "$m.pp" -m "$m.mod"
+  sudo semodule -i "$m.pp"
+done
+```
+
+No reboot is needed; the policy reloads immediately and the next login picks it up.
+
+Why `open`/`ioctl` on the TPM rule: the first `audit2allow` pass only saw `{ read write }`, and the denial then moved to `{ open }`. Granting the wider device set up front avoids a second iteration.
+
+### Why the second rule is hard to find
+
+Fedora's policy `dontaudit`s the `xdm_t` → `shadow_t` probe, so it never appears in `journalctl | grep avc`, and biopass flattens the `EACCES` into `NoLocalAccount`. Verify it by running a lookup inside the domain (a copy must live outside `/tmp`, which is `nosuid`):
+
+```bash
+sudo install -m 755 /usr/bin/getent /usr/local/bin/getent-xdm
+sudo chcon -t xdm_exec_t /usr/local/bin/getent-xdm
+sudo runcon system_u:system_r:xdm_t:s0-s0:c0.c1023 /usr/local/bin/getent-xdm shadow tychart
+sudo rm -f /usr/local/bin/getent-xdm
+```
+
+`selinux/` contains `test-shadow.sh`, which wraps this, and `verify-keyring.sh`, the post-login health check.
+
+### Verification
+
+After the modules are installed, log out and back in with a fingerprint or face, and **do not** type the keyring password. Then:
+
+```text
+$ journalctl -b | grep -E 'PAM_AUTHTOK|gkr-pam'
+gdm-password: Captured PAM_AUTHTOK of length 8 bytes
+gdm-password: gkr-pam: stashed password to try later in open session
+gdm-password: gkr-pam: gnome-keyring-daemon started properly and unlocked keyring
+
+$ busctl --user get-property org.freedesktop.secrets \
+    /org/freedesktop/secrets/collection/login \
+    org.freedesktop.Secret.Collection Locked
+b false
+
+$ ~/biopass/selinux/verify-keyring.sh    # Locked=false, no warnings, ssh OK
+```
+
+Confirmed after a full reboot: biometric login, keyring already unlocked, and SSH keys stored in the keyring usable immediately.
+
+### Note on Fedora 45's Secret Service
+
+Fedora 45 runs `oo7-daemon` (`pam_oo7`, `ImportCredential=oo7.keyring-encryption-password`, store at `~/.local/share/keyrings/v1/`), not `pam_gnome_keyring`. `gnome-keyring-daemon` logs `another secret service is running`. The biopass handoff still works because `pam_oo7` consumes `PAM_AUTHTOK` from the auth phase, but this is why `docs/Keyring.md` mentions modules that are not the active ones here.
+
+### Maintenance
+
+- Upstream report: [phucvinh57/biopass#252](https://github.com/phucvinh57/biopass/issues/252).
+- Re-run `selinux/verify-keyring.sh` after any `biopass`, `oo7-daemon`, or `selinux-policy-targeted` update.
+- If the rules land in Fedora's or biopass's own policy, drop the local ones: `sudo semodule -r biopass_tpm biopass_shadow`.
+- Re-derive from scratch if the denials change: `journalctl -b -o cat | grep 'avc:  denied' | grep biopass | audit2allow -M biopass_tpm`.
 
 ## Final authselect state
 
@@ -331,7 +450,12 @@ The Fedora/RHEL section of the Biopass PAM guide should mention:
 
 5. The guide should explicitly recommend keeping `polkit-1` and `pkexec` in Biopass's ignored PAM services and not ignoring `gdm-password`.
 6. Fedora users should be told to keep a root shell or TTY available while testing PAM changes.
+7. Fedora/RHEL users with SELinux enforcing need local policy for keyring unlock: `xdm_t` → `tpm_device_t:chr_file` **and** `xdm_t` → `shadow_t:file`. The second one is `dontaudit`ed, so it cannot be found from the AVC log; the docs should either ship the policy or show the modules.
+8. On Fedora 45 the Secret Service is `oo7-daemon` with `pam_oo7`, not `pam_gnome_keyring`/`pam_kwallet`; the keyring section of the docs should say so.
+9. `releaseKeyringPassword()` should log the `errno` behind `PasswordCheck::NoLocalAccount`; the current message made an SELinux denial look like an unsupported account type.
 
 ## Final conclusion
 
 Biopass 1.5.1 is confirmed working on Fedora 45 on a Framework Laptop 13 with a Goodix MOC fingerprint reader and TPM 2.0. The reliable configuration uses Fedora's normal authselect profile and adds Biopass only to the GDM authentication substack, allowing both fingerprint login and automatic GNOME Keyring unlock without destabilizing `sudo` or the rest of the system PAM configuration.
+
+Automatic keyring unlock additionally requires the two local SELinux modules documented above; without them biometric login works but the keyring stays locked. The complete chain (TPM unseal → shadow re-check → `PAM_AUTHTOK` → unlocked keyring → SSH keys usable) was verified after a full reboot on 2026-11-11. The missing policy and the misleading `NoLocalAccount` diagnostic were reported upstream as [phucvinh57/biopass#252](https://github.com/phucvinh57/biopass/issues/252).

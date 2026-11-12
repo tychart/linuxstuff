@@ -1,0 +1,14 @@
+module biopass_shadow 1.0;
+
+require {
+	type xdm_t;
+	type shadow_t;
+	class file { getattr open read };
+}
+
+# biopass-helper (spawned by the biopass PAM module inside GDM's xdm_t domain)
+# re-verifies the TPM-unsealed login password against /etc/shadow. Local policy
+# carries no allowance for that lookup, so getspnam_r() fails, biopass reports
+# "cannot check the saved keyring password (2)" (PasswordCheck::NoLocalAccount)
+# and PAM_AUTHTOK is never set -> login keyring stays locked after biometric login.
+allow xdm_t shadow_t:file { getattr open read };
