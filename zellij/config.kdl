@@ -28,5 +28,7 @@ show_startup_tips false
 // Automatically control nested sessions when focused
 nested_session_handling "descend"
 
+theme "ao"
+
 // Comment the following line if not using fish instead of default shell
 default_shell "fish"
