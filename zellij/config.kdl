@@ -14,12 +14,19 @@ keybinds {
                 close_on_exit true
             }
         }
+        bind "Alt [" { FocusGuestSession; }
+        bind "Alt ]" { FocusHostSession; }
     }
 }
 
+// Disables copy on select in favor of SmartCopy
 copy_on_select false
-show_startup_tips false
-support_kitty_keyboard_protocol true
 
-// Uncomment the following line if using fish instead of default terminal
-// default_shell "fish"
+// Removes startup tips
+show_startup_tips false
+
+// Automatically control nested sessions when focused
+nested_session_handling "descend"
+
+// Comment the following line if not using fish instead of default shell
+default_shell "fish"
